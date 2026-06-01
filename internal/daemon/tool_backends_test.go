@@ -1,0 +1,265 @@
+package daemon
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestNewGrepRunnerDefault(t *testing.T) {
+	runner := newGrepRunner("")
+	if _, ok := runner.(*systemGrepBackend); !ok {
+		t.Errorf("expected *systemGrepBackend, got %T", runner)
+	}
+}
+
+func TestNewGrepRunnerGrep(t *testing.T) {
+	runner := newGrepRunner("grep")
+	if _, ok := runner.(*systemGrepBackend); !ok {
+		t.Errorf("expected *systemGrepBackend, got %T", runner)
+	}
+}
+
+func TestNewGrepRunnerRg(t *testing.T) {
+	runner := newGrepRunner("rg")
+	// Result depends on whether rg is installed; just verify it returns a valid runner
+	if runner == nil {
+		t.Error("expected non-nil runner")
+	}
+}
+
+func TestNewGlobRunnerDefault(t *testing.T) {
+	runner := newGlobRunner("")
+	if _, ok := runner.(*builtinGlobBackend); !ok {
+		t.Errorf("expected *builtinGlobBackend, got %T", runner)
+	}
+}
+
+func TestNewGlobRunnerBuiltin(t *testing.T) {
+	runner := newGlobRunner("builtin")
+	if _, ok := runner.(*builtinGlobBackend); !ok {
+		t.Errorf("expected *builtinGlobBackend, got %T", runner)
+	}
+}
+
+func TestNewGlobRunnerFd(t *testing.T) {
+	runner := newGlobRunner("fd")
+	// Result depends on whether fd is installed; just verify it returns a valid runner
+	if runner == nil {
+		t.Error("expected non-nil runner")
+	}
+}
+
+func TestLoadToolsConfigMissing(t *testing.T) {
+	cfg := loadToolsConfig([]string{"/nonexistent/path/settings.json"})
+	if cfg.Grep.Backend != "" || cfg.Glob.Backend != "" {
+		t.Errorf("expected empty defaults, got grep=%q glob=%q", cfg.Grep.Backend, cfg.Glob.Backend)
+	}
+}
+
+func TestLoadToolsConfigValid(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".vix")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"tools": {"grep": {"backend": "rg"}, "glob": {"backend": "fd"}}}`
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadToolsConfig([]string{filepath.Join(configDir, "settings.json")})
+	if cfg.Grep.Backend != "rg" {
+		t.Errorf("expected grep backend 'rg', got %q", cfg.Grep.Backend)
+	}
+	if cfg.Glob.Backend != "fd" {
+		t.Errorf("expected glob backend 'fd', got %q", cfg.Glob.Backend)
+	}
+}
+
+func TestLoadToolsConfigNoToolsSection(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".vix")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"lsp": {}}`
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadToolsConfig([]string{filepath.Join(configDir, "settings.json")})
+	if cfg.Grep.Backend != "" || cfg.Glob.Backend != "" {
+		t.Errorf("expected empty defaults, got grep=%q glob=%q", cfg.Grep.Backend, cfg.Glob.Backend)
+	}
+}
+
+func TestSystemGrepBackendArgs(t *testing.T) {
+	backend := &systemGrepBackend{}
+	// Test with a pattern that won't match anything in a temp dir
+	dir := t.TempDir()
+	result, err := backend.Run(context.Background(), "nonexistent_pattern_xyz", ".", "", dir)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result != "(no matches)" {
+		t.Errorf("expected '(no matches)', got %q", result)
+	}
+}
+
+func TestBuiltinGlobBackendNoMatches(t *testing.T) {
+	backend := &builtinGlobBackend{}
+	dir := t.TempDir()
+	result, err := backend.Run(context.Background(), []string{"*.nonexistent_ext_xyz"}, nil, dir, "", false, 1000)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result != "(no matches)" {
+		t.Errorf("expected '(no matches)', got %q", result)
+	}
+}
+
+func TestBuiltinGlobBackendWithMatches(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &builtinGlobBackend{}
+	result, err := backend.Run(context.Background(), []string{"*.txt"}, nil, dir, "", false, 1000)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result == "(no matches)" {
+		t.Error("expected matches, got '(no matches)'")
+	}
+}
+
+func TestBuiltinGlobBackendMultiplePatterns(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.md", "c.go"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backend := &builtinGlobBackend{}
+	result, err := backend.Run(context.Background(), []string{"*.txt", "*.md"}, nil, dir, "", true, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "a.txt") || !strings.Contains(result, "b.md") {
+		t.Errorf("expected both a.txt and b.md in output, got %q", result)
+	}
+	if strings.Contains(result, "c.go") {
+		t.Errorf("did not expect c.go in output, got %q", result)
+	}
+}
+
+func TestBuiltinGlobBackendMultiplePaths(t *testing.T) {
+	root := t.TempDir()
+	subA := filepath.Join(root, "a")
+	subB := filepath.Join(root, "b")
+	for _, d := range []string{subA, subB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "file.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backend := &builtinGlobBackend{}
+	result, err := backend.Run(context.Background(), []string{"*.txt"}, []string{subA, subB}, root, "", true, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, filepath.Join(subA, "file.txt")) {
+		t.Errorf("missing subA match in %q", result)
+	}
+	if !strings.Contains(result, filepath.Join(subB, "file.txt")) {
+		t.Errorf("missing subB match in %q", result)
+	}
+}
+
+func TestBuiltinGlobBackendDedup(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &builtinGlobBackend{}
+	// Same match reachable via two overlapping patterns.
+	result, err := backend.Run(context.Background(), []string{"*.txt", "file.*"}, []string{dir}, dir, "", true, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(result), "\n")
+	if len(lines) != 1 {
+		t.Errorf("expected 1 deduped line, got %d: %v", len(lines), lines)
+	}
+}
+
+func TestFdGlobBackendMultiplePatterns(t *testing.T) {
+	if _, err := exec.LookPath("fd"); err != nil {
+		t.Skip("fd not installed")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.md", "c.go"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backend := &fdGlobBackend{}
+	result, err := backend.Run(context.Background(), []string{"*.txt", "*.md"}, nil, dir, "", true, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "a.txt") || !strings.Contains(result, "b.md") {
+		t.Errorf("expected both a.txt and b.md in output, got %q", result)
+	}
+	if strings.Contains(result, "c.go") {
+		t.Errorf("did not expect c.go in output, got %q", result)
+	}
+}
+
+func TestBuiltinGlobBackendHiddenFilterMultiPath(t *testing.T) {
+	root := t.TempDir()
+	visible := filepath.Join(root, "visible")
+	hiddenDir := filepath.Join(root, ".hidden")
+	for _, d := range []string{visible, hiddenDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "x.txt"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Also a hidden file inside a visible dir.
+	if err := os.WriteFile(filepath.Join(visible, ".secret.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &builtinGlobBackend{}
+	// Search both directories as base paths; include_hidden=false should drop
+	// the .secret.txt under visible/. The x.txt under .hidden/ is reached from
+	// a base *inside* the dotted dir, so its rel path does not contain a dotted
+	// segment and should remain.
+	result, err := backend.Run(context.Background(), []string{"*.txt"}, []string{visible, hiddenDir}, root, "", false, 1000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result, ".secret.txt") {
+		t.Errorf("expected .secret.txt to be filtered, got %q", result)
+	}
+	if !strings.Contains(result, filepath.Join(visible, "x.txt")) {
+		t.Errorf("expected visible/x.txt in result, got %q", result)
+	}
+	if !strings.Contains(result, filepath.Join(hiddenDir, "x.txt")) {
+		t.Errorf("expected .hidden/x.txt in result (base itself is search root), got %q", result)
+	}
+}

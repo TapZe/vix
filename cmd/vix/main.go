@@ -1,0 +1,456 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/kirby88/vix/internal/config"
+	"github.com/kirby88/vix/internal/daemon"
+	"github.com/kirby88/vix/internal/telemetry"
+	"github.com/kirby88/vix/internal/daemon/brain"
+	"github.com/kirby88/vix/internal/headless"
+
+	"github.com/kirby88/vix/internal/ui"
+	"github.com/mattn/go-isatty"
+)
+
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
+func main() {
+	versionFlag := flag.Bool("version", false, "Print version and exit")
+	forceInit := flag.Bool("force-init", false, "Delete and re-create the .vix directory")
+	testMode := flag.Bool("test", false, "Fill chat with fake data for UI testing")
+	prompt := flag.String("p", "", "Run a single prompt non-interactively (headless mode). Use '-' to read from stdin.")
+	workflow := flag.String("w", "", "Workflow name to run (e.g. 'Plan Workflow'). Requires -p.")
+	outputFormat := flag.String("output-format", "text", "Output format for headless mode: text, json, stream-json")
+	workdir := flag.String("workdir", "", "Set the working directory for this session")
+	configDir := flag.String("config-dir", "", "Use this directory as the sole .vix config root (ignores ~/.vix and ./.vix)")
+	disableWritePermission := flag.Bool("disable-automatic-write-permission", false, "Require user confirmation for write_file, edit_file, and delete_file calls (by default, writes execute without confirmation)")
+	disableDirAccess := flag.Bool("disable-automatic-directory-access", false, "Restrict tool calls to paths within the working directory (by default, all paths are accessible)")
+	vfsFlag := flag.Bool("vfs", false, "Run a VFS command (e.g. vix --vfs read_file <path>)")
+	logDir := flag.String("log-dir", "", "Directory for log files (vixd.log, vix-thinking.log, vix-bash-history.log, vix-jobs/). Defaults to the system temp dir. Forwarded to the spawned vixd.")
+	socketPath := flag.String("socket-path", "", "Unix socket path for the vix↔vixd connection. Defaults to /tmp/vixd.sock. Forwarded to the spawned vixd.")
+	authTokenPath := flag.String("auth-token-path", "", "Path to a file holding the shared-secret token to authenticate every socket message. Must match the daemon's -auth-token-path. Empty disables auth on this client; the daemon must also be unauthenticated for that to work.")
+	pprofPort := flag.Int("pprof-port", 0, "Port for the pprof HTTP server (GET /debug/pprof/*). 0 disables it. Env: VIX_PPROF_PORT.")
+	flag.Parse()
+
+	// Resolve --log-dir to an absolute path once so the value passed
+	// through to vixd matches what vix uses for the daemon stdout
+	// redirect. Empty stays empty (default behaviour preserved).
+	resolvedLogDir := ""
+	if *logDir != "" {
+		abs, err := filepath.Abs(*logDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot resolve --log-dir %q: %v\n", *logDir, err)
+			os.Exit(1)
+		}
+		if err := os.MkdirAll(abs, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot create --log-dir %q: %v\n", abs, err)
+			os.Exit(1)
+		}
+		resolvedLogDir = abs
+	}
+
+	if v := os.Getenv("VIX_PPROF_PORT"); v != "" && *pprofPort == 0 {
+		if p, err := strconv.Atoi(v); err == nil {
+			*pprofPort = p
+		}
+	}
+	if *pprofPort > 0 {
+		pprofCtx, pprofCancel := context.WithCancel(context.Background())
+		defer pprofCancel()
+		go daemon.StartPprofServer(pprofCtx, *pprofPort)
+	}
+
+	if *versionFlag {
+		fmt.Println("vix " + Version)
+		return
+	}
+
+	// VFS subcommands
+	if *vfsFlag {
+		args := flag.Args()
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: vix --vfs read_file <path>\n       vix --vfs edit_file <path> <old_string> <new_string>\n")
+			os.Exit(1)
+		}
+		cwd, _ := os.Getwd()
+		if *workdir != "" {
+			cwd = *workdir
+		}
+		vfsPaths := config.NewVixPaths(*configDir, config.HomeVixDir(), cwd)
+		brain.InitLanguageMap(vfsPaths.Settings())
+
+		// For legacy VfsEdit callers that expect a home dir, pass the override
+		// in override mode so formatter configs resolve from there.
+		vfsHomeDir := config.HomeVixDir()
+		if *configDir != "" {
+			vfsHomeDir = *configDir
+		}
+
+		switch args[0] {
+		case "read_file":
+			output, err := daemon.VfsRead(cwd, nil, args[1], nil, nil, false)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Print(output)
+		case "edit_file":
+			if len(args) < 4 {
+				fmt.Fprintf(os.Stderr, "Usage: vix --vfs edit_file <path> <old_string> <new_string>\n")
+				os.Exit(1)
+			}
+			msg, _, err := daemon.VfsEdit(cwd, nil, vfsHomeDir, args[1], args[2], args[3], false)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println(msg)
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown vfs command: %s\nUsage: vix --vfs read_file <path>\n       vix --vfs edit_file <path> <old_string> <new_string>\n", args[0])
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Validate flags
+	format := headless.OutputFormat(*outputFormat)
+	if *prompt == "" && *outputFormat != "text" {
+		fmt.Fprintf(os.Stderr, "Error: --output-format requires -p\n")
+		os.Exit(1)
+	}
+	if *workflow != "" && *prompt == "" {
+		fmt.Fprintf(os.Stderr, "Error: -w requires -p\n")
+		os.Exit(1)
+	}
+	if *prompt != "" && !format.Valid() {
+		fmt.Fprintf(os.Stderr, "Error: invalid --output-format %q (must be text, json, or stream-json)\n", *outputFormat)
+		os.Exit(1)
+	}
+
+	// Read prompt from stdin if -p -
+	if *prompt == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
+			os.Exit(1)
+		}
+		text := string(data)
+		if text == "" {
+			fmt.Fprintf(os.Stderr, "Error: empty prompt from stdin\n")
+			os.Exit(1)
+		}
+		prompt = &text
+	}
+
+	// Pre-flight credential resolution. The session resolves the actual
+	// per-provider credential when the daemon constructs the LLM (based on
+	// the active chat agent's `model:` frontmatter); this check just makes
+	// sure the user has at least one usable key configured and offers a
+	// first-run interactive prompt for ANTHROPIC_API_KEY when none is set.
+	// Users on non-Anthropic providers must set their provider's env var
+	// (OPENAI_API_KEY / OPENROUTER_API_KEY / MINIMAX_API_KEY / MIMO_API_KEY)
+	// themselves.
+	var apiKey string
+	apiKey, _ = config.ResolveProviderKey("anthropic", true) // also accepts CLAUDE_CODE_OAUTH_TOKEN
+	hasNonAnthropicKey := func() bool {
+		for _, p := range []string{"openai", "openrouter", "minimax", "mimo"} {
+			if k, _ := config.ResolveProviderKey(p, false); k != "" {
+				return true
+			}
+		}
+		return false
+	}
+	if apiKey == "" && !hasNonAnthropicKey() {
+		isHeadless := *prompt != ""
+		if isHeadless {
+			fmt.Fprintf(os.Stderr, "Error: no API key found. Set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY, or MIMO_API_KEY.\n")
+			os.Exit(1)
+		}
+		if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+			apiKey = promptAPIKey()
+			if apiKey != "" {
+				if err := config.StoreProviderKey("anthropic", apiKey); err != nil {
+					warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+					fmt.Fprintf(os.Stderr, "%s %v\n", warnStyle.Render("Warning: could not save key to keychain:"), err)
+				}
+			}
+		}
+	}
+
+	cfg, err := config.Load(*forceInit, *workdir, *configDir, *socketPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// When --config-dir is set, make sure the directory exists and is
+	// bootstrapped with default settings/agents so the session starts with a
+	// working config.
+	if cfg.ConfigDir != "" {
+		if err := os.MkdirAll(cfg.ConfigDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating --config-dir %q: %v\n", cfg.ConfigDir, err)
+			os.Exit(1)
+		}
+		if err := config.BootstrapHomeVixDir(cfg.ConfigDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: bootstrap of --config-dir failed: %v\n", err)
+		}
+	}
+
+	appMode := "tui"
+	if *prompt != "" {
+		appMode = "headless"
+	}
+	telemetry.Init(telemetry.Config{Version: Version, Mode: appMode, Enabled: config.TelemetryEnabled()})
+	defer telemetry.Shutdown()
+	telemetry.TrackTUIStarted(appMode, Version)
+	ui.Version = Version
+
+	var session *daemon.SessionClient
+
+	var daemonCmd *exec.Cmd
+
+	// Load the socket auth token (if -auth-token-path was given) once,
+	// before any daemon RPC. Same file the spawned vixd will read on the
+	// other side, so client and daemon arrive at identical bytes. We
+	// fail-fast on a misconfigured path: silently dropping auth would
+	// defeat the purpose of pointing at it.
+	authToken := ""
+	if *authTokenPath != "" {
+		raw, err := os.ReadFile(*authTokenPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read --auth-token-path %q: %v\n", *authTokenPath, err)
+			os.Exit(1)
+		}
+		authToken = strings.TrimSpace(string(raw))
+		if authToken == "" {
+			fmt.Fprintf(os.Stderr, "Error: --auth-token-path %q is empty after trimming whitespace\n", *authTokenPath)
+			os.Exit(1)
+		}
+	}
+
+	if !*testMode {
+		client := daemon.NewClient(cfg.SocketPath)
+		client.SetAuthToken(authToken)
+		if !client.Ping() {
+			if *prompt != "" {
+				// Headless mode: auto-start silently
+				var err error
+				daemonCmd, err = startDaemon(apiKey, resolvedLogDir, cfg.SocketPath, *authTokenPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+					os.Exit(1)
+				}
+				if !waitForDaemon(client, 5*time.Second) {
+					fmt.Fprintf(os.Stderr, "Error: daemon did not start in time\n")
+					os.Exit(1)
+				}
+			} else {
+				// Interactive mode: ask the user
+				choice := promptDaemonChoice()
+				if choice == 1 {
+					var err error
+					daemonCmd, err = startDaemon(apiKey, resolvedLogDir, cfg.SocketPath, *authTokenPath)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+						os.Exit(1)
+					}
+					if !waitForDaemon(client, 5*time.Second) {
+						fmt.Fprintf(os.Stderr, "Error: daemon did not start in time\n")
+						os.Exit(1)
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "Start the daemon manually with:\n  vix-daemon\n\n")
+				}
+			}
+		}
+
+		// Connect session if daemon is running
+		if client.Ping() {
+			session = daemon.NewSessionClient(cfg.SocketPath)
+			session.SetAuthToken(authToken)
+			if err := session.Connect(cfg.CWD, cfg.ConfigDir, cfg.Model, cfg.ForceInit, !*disableWritePermission, !*disableDirAccess, *prompt != ""); err != nil {
+				fmt.Fprintf(os.Stderr, "Error connecting to daemon: %v\n", err)
+				os.Exit(1)
+			}
+			defer session.SendClose()
+		}
+	}
+
+	// Cleanup daemon subprocess on exit
+	if daemonCmd != nil {
+		defer func() {
+			daemonCmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() {
+				daemonCmd.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				daemonCmd.Process.Kill()
+			}
+		}()
+	}
+
+	// Headless mode: send prompt and print result
+	if *prompt != "" {
+		if session == nil {
+			fmt.Fprintf(os.Stderr, "Error: headless mode requires a daemon connection (cannot use --test)\n")
+			os.Exit(1)
+		}
+		if err := headless.Run(session, *prompt, format, *workflow); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	ui.ApplyTheme(config.LoadThemeConfig(cfg.Paths))
+
+	model := ui.NewModel(cfg, session, *testMode, authToken, !*disableWritePermission, !*disableDirAccess)
+
+	p := tea.NewProgram(model)
+	ui.SetProgram(p)
+
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// promptDaemonChoice asks the user how to handle a missing daemon.
+// Returns 1 (start subprocess) or 2 (start manually later).
+func promptDaemonChoice() int {
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	num := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+
+	fmt.Println(warn.Render("The vix daemon is not running."))
+	fmt.Println()
+	fmt.Printf("  %s %s\n", num.Render("1)"), "Start daemon as a subprocess "+dim.Render("(will stop when this session exits, killing any other connected sessions)"))
+	fmt.Printf("  %s %s\n", num.Render("2)"), "Start the daemon manually later")
+	fmt.Println()
+	fmt.Print(prompt.Render("Choose [1/2] (default: 1): "))
+
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "2" {
+		return 2
+	}
+	return 1
+}
+
+// findDaemon returns the path to the vixd binary.
+// It checks $PATH first, then the directory containing the current executable.
+func findDaemon() (string, error) {
+	if p, err := exec.LookPath("vixd"); err == nil {
+		return p, nil
+	}
+	self, err := os.Executable()
+	if err == nil {
+		candidate := filepath.Join(filepath.Dir(self), "vixd")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("vixd not found in $PATH or next to the vix binary")
+}
+
+// startDaemon spawns the daemon process as a subprocess.
+// If apiKey is non-empty, it is injected into the subprocess environment.
+// The daemon's stdout and stderr are redirected to <logDir>/vixd.log so
+// that logs, panics, and crash traces are recoverable after the fact.
+// If logDir is empty, os.TempDir() is used (the legacy /tmp default).
+// logDir, when non-empty, is also forwarded to the spawned vixd via
+// --log-dir so the daemon's own log files land in the same directory.
+// socketPath is always forwarded to vixd so client and daemon agree on
+// the socket location.
+// authTokenPath, when non-empty, is forwarded so the daemon enforces
+// shared-secret auth on every incoming socket message. The same path is
+// read by the client (vix CLI) so both sides see the same token.
+func startDaemon(apiKey, logDir, socketPath, authTokenPath string) (*exec.Cmd, error) {
+	daemonPath, err := findDaemon()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{}
+	if logDir != "" {
+		args = append(args, "--log-dir", logDir)
+	}
+	if socketPath != "" {
+		args = append(args, "--socket-path", socketPath)
+	}
+	if authTokenPath != "" {
+		args = append(args, "--auth-token-path", authTokenPath)
+	}
+	cmd := exec.Command(daemonPath, args...)
+	if apiKey != "" {
+		cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+apiKey)
+	}
+	logFileDir := logDir
+	if logFileDir == "" {
+		logFileDir = os.TempDir()
+	}
+	if logFile, err := os.OpenFile(filepath.Join(logFileDir, "vixd.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
+	cmd.Stdin = nil
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	// Log the daemon's exit status asynchronously so we can distinguish a
+	// crash / signal kill (e.g. OOM "signal: killed") from a clean shutdown.
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			fmt.Fprintf(os.Stderr, "[vix] daemon exited: %v\n", err)
+		}
+	}()
+	return cmd, nil
+}
+
+// promptAPIKey asks the user to enter their Anthropic API key interactively.
+func promptAPIKey() string {
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+
+	fmt.Println(warn.Render("No API key found."))
+	fmt.Println()
+	fmt.Print(prompt.Render("Enter your Anthropic API key: "))
+
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	key := strings.TrimSpace(line)
+	return key
+}
+
+// waitForDaemon polls until the daemon responds to ping or timeout.
+func waitForDaemon(client *daemon.Client, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if client.Ping() {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}

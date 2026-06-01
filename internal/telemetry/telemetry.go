@@ -1,0 +1,160 @@
+package telemetry
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"log"
+	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/posthog/posthog-go"
+	"github.com/zalando/go-keyring"
+)
+
+const (
+	posthogHost    = "https://us.i.posthog.com"
+	keyringService = "vix"
+	keyringUser    = "device-id"
+)
+
+// Config controls telemetry initialization.
+type Config struct {
+	Version string // build version
+	Mode    string // "tui", "headless", "daemon"
+	Enabled bool   // false disables all telemetry (from settings.json feature flag)
+}
+
+var (
+	client    posthog.Client
+	deviceID  string
+	enabled   bool
+	version   = "dev" // overwritten by Init(); "dev" means an unstamped local build
+	mode      string
+	initOnce  sync.Once
+	closeOnce sync.Once
+)
+
+// Version returns the build version string set via Init (or "dev" if unset).
+func Version() string {
+	return version
+}
+
+// Init initializes the telemetry client. Safe to call multiple times; only the first call takes effect.
+func Init(cfg Config) {
+	initOnce.Do(func() {
+		version = cfg.Version
+		mode = cfg.Mode
+
+		// Check opt-out: env var or settings.json feature flag
+		if !cfg.Enabled {
+			return
+		}
+		if isOptedOut() {
+			return
+		}
+
+		posthogAPIKey := os.Getenv("VIX_POSTHOG_API_KEY")
+		if posthogAPIKey == "" {
+			return
+		}
+
+		// Load or create device ID
+		id, err := GetOrCreateDeviceID()
+		if err != nil {
+			logDebug("[telemetry] failed to get device ID: %v", err)
+			return
+		}
+		deviceID = id
+
+		c, err := posthog.NewWithConfig(posthogAPIKey, posthog.Config{
+			Endpoint:  posthogHost,
+			BatchSize: 20,
+			Interval:  30 * time.Second,
+		})
+		if err != nil {
+			logDebug("[telemetry] failed to create PostHog client: %v", err)
+			return
+		}
+		client = c
+		enabled = true
+		logDebug("[telemetry] initialized (device=%s, mode=%s)", deviceID, mode)
+	})
+}
+
+// Shutdown flushes pending events and closes the client.
+func Shutdown() {
+	closeOnce.Do(func() {
+		if client != nil {
+			logDebug("[telemetry] flushing and shutting down")
+			client.Close()
+		}
+	})
+}
+
+// Enabled reports whether telemetry is active.
+func Enabled() bool {
+	return enabled
+}
+
+// Track sends an event to PostHog with common properties merged in.
+func Track(event string, properties map[string]interface{}) {
+	if !enabled {
+		return
+	}
+
+	props := posthog.NewProperties()
+	// Common properties
+	props.Set("version", version)
+	props.Set("os", runtime.GOOS)
+	props.Set("arch", runtime.GOARCH)
+	props.Set("mode", mode)
+
+	// Merge caller properties
+	for k, v := range properties {
+		props.Set(k, v)
+	}
+
+	client.Enqueue(posthog.Capture{
+		DistinctId: deviceID,
+		Event:      event,
+		Properties: props,
+	})
+}
+
+// HashWorkflowName returns a truncated SHA256 hex digest of the workflow name.
+func HashWorkflowName(name string) string {
+	h := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("%x", h[:6]) // 12 hex chars
+}
+
+// logDebug logs only when running a dev build.
+func logDebug(format string, args ...any) {
+	if version == "dev" {
+		log.Printf(format, args...)
+	}
+}
+
+// isOptedOut checks whether the user has disabled telemetry.
+func isOptedOut() bool {
+	v := strings.ToLower(os.Getenv("VIX_TELEMETRY"))
+	return v == "off" || v == "false" || v == "0"
+}
+
+// GetOrCreateDeviceID loads the device ID from the system keychain,
+// or generates and stores a new one if none exists.
+func GetOrCreateDeviceID() (string, error) {
+	id, err := keyring.Get(keyringService, keyringUser)
+	if err == nil && id != "" {
+		return id, nil
+	}
+
+	id = uuid.New().String()
+	if err := keyring.Set(keyringService, keyringUser, id); err != nil {
+		return "", fmt.Errorf("failed to store device ID: %w", err)
+	}
+	return id, nil
+}
