@@ -4,7 +4,12 @@
 
 Sleek, Fast and Token Efficient AI Coding Agent
 
-[![GitHub Release](https://img.shields.io/github/v/release/kirby88/vix-releases?color=green)](https://github.com/kirby88/vix-releases/releases) - [vix website](https://getvix.dev) - [![Discord](https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/3NzDtdFF7C)
+<p align="center">
+  <a href="https://github.com/kirby88/vix/releases"><img src="https://img.shields.io/github/v/release/kirby88/vix?style=for-the-badge&color=green" alt="Latest release" /></a>
+  <a href="https://github.com/kirby88/vix/releases"><img src="https://img.shields.io/github/downloads/kirby88/vix/total?style=for-the-badge" alt="Total downloads" /></a>
+  <a href="https://github.com/kirby88/vix"><img src="https://img.shields.io/badge/website-getvix.dev-blue?style=for-the-badge" alt="Website" /></a>
+  <a href="https://discord.gg/3NzDtdFF7C"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white&style=for-the-badge" alt="Discord" /></a>
+</p>
 </div>
 
 <div align="center">
