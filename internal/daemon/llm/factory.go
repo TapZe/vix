@@ -95,10 +95,12 @@ func ParseModel(spec string) (ProviderID, string, error) {
 		return ProviderOpenAI, strings.TrimPrefix(spec, "openai/"), nil
 	case strings.HasPrefix(spec, "anthropic/"):
 		return ProviderAnthropic, strings.TrimPrefix(spec, "anthropic/"), nil
+	case strings.HasPrefix(spec, "bedrock/"):
+		return ProviderBedrock, strings.TrimPrefix(spec, "bedrock/"), nil
 	case spec == "":
 		return "", "", fmt.Errorf("model spec is empty")
 	default:
-		return "", "", fmt.Errorf("model spec %q must start with anthropic/, openai/, openrouter/, minimax/, or mimo/", spec)
+		return "", "", fmt.Errorf("model spec %q must start with anthropic/, bedrock/, openai/, openrouter/, minimax/, or mimo/", spec)
 	}
 }
 
@@ -158,6 +160,8 @@ func EnvVarFor(p ProviderID) string {
 	switch p {
 	case ProviderAnthropic:
 		return "ANTHROPIC_API_KEY"
+	case ProviderBedrock:
+		return "AWS_BEARER_TOKEN_BEDROCK"
 	case ProviderOpenAI:
 		return "OPENAI_API_KEY"
 	case ProviderOpenRouter:
@@ -195,6 +199,8 @@ func NewFromModel(spec string, plugin PluginConfig, effort string, maxTokens int
 	switch prov {
 	case ProviderAnthropic:
 		return NewAnthropic(cfg)
+	case ProviderBedrock:
+		return NewBedrock(cfg)
 	case ProviderOpenAI:
 		return NewOpenAI(cfg)
 	case ProviderOpenRouter:

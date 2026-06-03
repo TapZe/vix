@@ -73,6 +73,8 @@ func providerEnvVar(provider string) string {
 	switch provider {
 	case "anthropic":
 		return "ANTHROPIC_API_KEY"
+	case "bedrock":
+		return "AWS_BEARER_TOKEN_BEDROCK"
 	case "openai":
 		return "OPENAI_API_KEY"
 	case "openrouter":
@@ -204,6 +206,7 @@ func loadKeyFromEnvFile(path, varName string) string {
 	}
 	prefix := varName + "="
 	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimPrefix(strings.TrimSpace(line), "export ")
 		if strings.HasPrefix(line, prefix) {
 			return strings.TrimSpace(strings.SplitN(line, "=", 2)[1])
 		}
