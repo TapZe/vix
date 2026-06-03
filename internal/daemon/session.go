@@ -1039,6 +1039,13 @@ func (s *Session) executeToolDirect(ctx context.Context, name string, params map
 		return blocked
 	}
 
+	// Schema validation: reject malformed tool calls (missing required field,
+	// wrong-typed field) before any handler runs, so the model gets a clear
+	// error instead of a handler silently proceeding with a zero value.
+	if err := validateToolInput(name, params); err != nil {
+		return &ToolResult{Output: err.Error(), IsError: true}
+	}
+
 	// If the session has automatic write permission disabled, intercept write-class
 	// tools and request user confirmation before executing them.
 	if !s.enableAutomaticWritePermission && writeClassTools[name] {
@@ -1226,6 +1233,13 @@ func (s *Session) executeToolConfirmed(ctx context.Context, name string, params 
 	// editing it (either directly, or inheriting from the parent's reads).
 	if blocked := s.enforceReadGate(name, params); blocked != nil {
 		return blocked
+	}
+
+	// Schema validation: same gate as executeToolDirect, covering the
+	// subagent/workflow entry point. MCP tools have no local schema and are
+	// passed through (validateToolInput returns nil for them).
+	if err := validateToolInput(name, params); err != nil {
+		return &ToolResult{Output: err.Error(), IsError: true}
 	}
 
 	if dirs := s.detectOutsideDirs(name, params); len(dirs) > 0 && !s.enableAutomaticDirectoryAccess {
