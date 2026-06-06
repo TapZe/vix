@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -726,12 +727,35 @@ func (s *Session) initBrain() {
 	if len(s.workflows) > 0 {
 		log.Printf("[session] loaded %d workflow(s) from config", len(s.workflows))
 	}
-	log.Printf("[session] chat agent: %s", s.chatAgent)
 
+	// Expose the `skill` tool only when skills are loaded. Appended after all
+	// tool-list filtering (like MCP tools) so it survives agent tool restrictions.
+	if s.skills != nil && s.skills.Count() > 0 {
+		s.tools = append(s.tools, SkillToolSchema())
+	}
+	log.Printf("[session] chat agent: %s", s.chatAgent)
 	s.emit("event.init_state", protocol.EventInitState{State: int(protocol.InitDone), Model: s.model})
 	s.emit("event.workflows_available", protocol.EventWorkflowsAvailable{
 		Workflows: s.workflowInfoList(),
 	})
+	s.emit("event.skills_available", protocol.EventSkillsAvailable{
+		Skills: s.skillInfoList(),
+	})
+}
+
+// skillInfoList returns the loaded skills as name/description pairs, sorted by
+// name, for slash-command autocomplete in the UI.
+func (s *Session) skillInfoList() []protocol.SkillInfo {
+	if s.skills == nil {
+		return nil
+	}
+	all := s.skills.All()
+	infos := make([]protocol.SkillInfo, 0, len(all))
+	for name, sk := range all {
+		infos = append(infos, protocol.SkillInfo{Name: name, Description: sk.Description})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+	return infos
 }
 
 // workflowInfoList returns the list of WorkflowInfo in config order.
@@ -840,6 +864,15 @@ func (s *Session) buildSystemPrompt() []llm.SystemBlock {
 			blocks = append(blocks, llm.SystemBlock{Text: text})
 		}
 		log.Printf("[session] loaded %d instruction file(s)", len(instrFiles))
+	}
+
+	// Inject available-skills metadata (level 1 of progressive disclosure):
+	// just names + descriptions, so the model knows what it can load via the
+	// `skill` tool without paying for the full bodies up front.
+	if s.skills != nil && s.skills.Count() > 0 {
+		if block := s.skills.FormatForSystemPrompt(); block != "" {
+			blocks = append(blocks, llm.SystemBlock{Text: block})
+		}
 	}
 
 	return blocks
@@ -1094,6 +1127,22 @@ func (s *Session) executeToolDirect(ctx context.Context, name string, params map
 		}
 		params["_requested_dirs"] = dirs
 		return &ToolResult{NeedsConfirmation: true, ToolName: name, Params: params}
+	}
+
+	// Route the `skill` tool inline: it needs the session's skill registry,
+	// which server-level handlers can't reach. Returns the skill body plus a
+	// listing of bundled files (progressive disclosure levels 2 and 3).
+	if name == "skill" {
+		skillName, _ := params["name"].(string)
+		if skillName == "" {
+			return &ToolResult{Output: "skill: missing required field \"name\"", IsError: true}
+		}
+		sk := s.skills.Get(skillName)
+		if sk == nil {
+			return &ToolResult{Output: fmt.Sprintf("skill: no skill named %q", skillName), IsError: true}
+		}
+		args, _ := params["arguments"].(string)
+		return &ToolResult{Output: sk.LoadForTool(args)}
 	}
 
 	// Route MCP tools directly to the session's MCP pool.
@@ -1548,6 +1597,23 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 		s.compactMessages(keepFromMsgIdx, summarizedTurns, false)
 		s.emit("event.agent_done", nil)
 		return
+	}
+
+	// /<skill-name> [args] — explicit skill invocation. If the leading slash
+	// token names a loaded skill, render its body (with args substituted) and
+	// use that as the turn's user message. This is the user-driven counterpart
+	// to the model-driven `skill` tool.
+	if strings.HasPrefix(text, "/") && s.skills != nil && s.skills.Count() > 0 {
+		rest := strings.TrimPrefix(text, "/")
+		name := rest
+		args := ""
+		if i := strings.IndexByte(rest, ' '); i >= 0 {
+			name = rest[:i]
+			args = strings.TrimSpace(rest[i+1:])
+		}
+		if sk := s.skills.Get(name); sk != nil {
+			text = sk.LoadForTool(args)
+		}
 	}
 
 	// Validate attachments before adding

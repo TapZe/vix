@@ -45,6 +45,7 @@ type SessionState struct {
 	agentState     AppState
 	activeWorkflow string
 	workflows      []protocol.WorkflowInfo
+	skills         []protocol.SkillInfo
 	activePlan     *protocol.Plan
 	todos          []protocol.TodoItem
 

@@ -90,6 +90,25 @@ All path resolution flows through `config.VixPaths` (internal/config/paths.go). 
 
 Pass `--config-dir /some/path` to use that directory as the sole `.vix` root. Neither `~/.vix` nor `./.vix` is consulted, and all session state (history, plans, access stats, LLM logs) is written inside the override directory. The directory is auto-created and bootstrapped with default settings on first run. This is useful for sandboxed/reproducible sessions without touching real user or project config.
 
+## Skills
+
+Skills are reusable, task-specific instruction sets. Each skill is a directory under `.vix/skills/<name>/` containing a `SKILL.md` file (YAML frontmatter + markdown body) and, optionally, supporting files (`reference.md`, `scripts/`, etc.). Project skills override user skills on name collision. The engine lives in `internal/agent/skills.go`.
+
+Frontmatter fields parsed today: `name`, `description`, `model`, `allowed-tools`. Body templating supports `$ARGUMENTS`, positional `$1`/`$2`, `` !`cmd` `` dynamic command injection, and `${SKILL_DIR}` (absolute path to the skill directory).
+
+Skills use **progressive disclosure** — three layers loaded only as needed:
+
+1. **Metadata (always present)** — each skill's name + description is injected into the system prompt via `SkillRegistry.FormatForSystemPrompt` (wired in `Session.buildSystemPrompt`). Cheap; lets the model know what exists.
+2. **Body (on demand)** — the full `SKILL.md` body loads only when a skill is invoked, via `Skill.LoadForTool` (body with args substituted + a listing of bundled files).
+3. **Bundled files (on demand)** — the model reads `reference.md` / runs `scripts/*` with the normal `read_file`/`bash` tools using the absolute paths listed in layer 2.
+
+Two invocation paths, both calling `LoadForTool` under the hood:
+
+- **Implicit (model-driven)** — the `skill` tool (`SkillToolSchema`, dispatched inline in `Session.executeToolDirect`). Appended to the session tool list only when at least one skill is loaded. The model calls `skill(name, arguments?)` when a task matches an advertised skill.
+- **Explicit (user-driven)** — typing `/<skill-name> [args]`, intercepted in the input handler before the turn starts and rendered into the user message. Skill names are advertised to the TUI via `event.skills_available` so they autocomplete in the slash menu.
+
+`/skills` lists all loaded skills.
+
 ## Default access policy
 
 The agent decides whether a path is accessible by default by checking, in order: cwd, `$HOME`, the host's system directories (per platform), or any entry in `allowed_directories`. Anything outside that set surfaces as a confirmation prompt (interactive sessions) or an error (headless). The `deny_list` always wins, even if the path matches one of the auto-allow categories.

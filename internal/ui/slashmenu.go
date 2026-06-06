@@ -24,6 +24,9 @@ var slashCommands = []Command{
 // slash command is selected from the menu (so the user can type its argument).
 // ok is false for commands that should execute immediately on select.
 func slashCommandInsertText(action string) (string, bool) {
+	if name, ok := strings.CutPrefix(action, "slash_skill:"); ok {
+		return "/" + name + " ", true
+	}
 	switch action {
 	case "slash_fork":
 		return "/fork ", true
@@ -37,6 +40,29 @@ func slashCommandInsertText(action string) (string, bool) {
 		return "/compact ", true
 	}
 	return "", false
+}
+
+// sessionSlashCommands returns the built-in slash commands followed by one
+// entry per loaded skill, so skills autocomplete alongside built-ins. Selecting
+// a skill inserts "/<name> " for the user to add arguments and submit.
+func sessionSlashCommands(sess *SessionState) []Command {
+	if sess == nil || len(sess.skills) == 0 {
+		return slashCommands
+	}
+	cmds := make([]Command, 0, len(slashCommands)+len(sess.skills))
+	cmds = append(cmds, slashCommands...)
+	for _, sk := range sess.skills {
+		desc := sk.Description
+		if desc == "" {
+			desc = "Run the " + sk.Name + " skill"
+		}
+		cmds = append(cmds, Command{
+			Name:        sk.Name,
+			Description: desc,
+			Action:      "slash_skill:" + sk.Name,
+		})
+	}
+	return cmds
 }
 
 // SlashMenu is a popup that lists available slash commands matching the typed /query.

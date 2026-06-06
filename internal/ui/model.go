@@ -992,7 +992,7 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if sess.slashMenu.IsVisible() {
 					sess.slashMenu.Refresh(slashQuery)
 				} else {
-					sess.slashMenu.Open(slashCommands, slashQuery)
+					sess.slashMenu.Open(sessionSlashCommands(sess), slashQuery)
 				}
 			} else {
 				sess.slashMenu.Close()
@@ -1851,6 +1851,12 @@ func (m *Model) applyEventToSession(idx int, event protocol.SessionEvent) []tea.
 				sess.activeWorkflow = ""
 			}
 		}
+
+	case "event.skills_available":
+		data := marshalData(event.Data)
+		var sa protocol.EventSkillsAvailable
+		json.Unmarshal(data, &sa)
+		sess.skills = sa.Skills
 
 	case "event.stream_chunk":
 		data := marshalData(event.Data)

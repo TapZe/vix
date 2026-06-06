@@ -1,0 +1,104 @@
+package daemon
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/get-vix/vix/internal/agent"
+)
+
+// newSkillSession builds a minimal session whose skill registry is loaded from
+// the given project skills directory, suitable for exercising the `skill` tool
+// dispatch path in executeToolDirect.
+func newSkillSession(t *testing.T, skillsDir string) *Session {
+	t.Helper()
+	srv := &Server{handlers: make(map[string]HandlerFunc)}
+	RegisterToolHandlers(srv)
+	return &Session{
+		server:                         srv,
+		cwd:                            t.TempDir(),
+		headless:                       true,
+		enableAutomaticWritePermission: true,
+		enableAutomaticDirectoryAccess: true,
+		readFiles:                      make(map[string]bool),
+		skills:                         agent.LoadSkills(skillsDir),
+		projectConfig: ProjectConfig{
+			ToolTimeouts: ToolTimeouts{Default: 30 * time.Second, Max: 60 * time.Second},
+		},
+	}
+}
+
+func writeSkill(t *testing.T, root, name, body string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestSkillTool_LoadsBodyAndBundledFiles(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "deploy", `---
+name: deploy
+description: Deploy the app
+---
+Deploy $ARGUMENTS now.
+`)
+	os.WriteFile(filepath.Join(dir, "checklist.md"), []byte("checklist"), 0o644)
+
+	s := newSkillSession(t, root)
+	res := s.executeToolDirect(context.Background(), "skill", map[string]any{
+		"name":      "deploy",
+		"arguments": "staging",
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	if !strings.Contains(res.Output, "Deploy staging now.") {
+		t.Errorf("body not rendered with args: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, filepath.Join(dir, "checklist.md")) {
+		t.Errorf("bundled file path not listed: %q", res.Output)
+	}
+}
+
+func TestSkillTool_MissingName(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "deploy", "---\nname: deploy\ndescription: x\n---\nbody\n")
+	s := newSkillSession(t, root)
+
+	res := s.executeToolDirect(context.Background(), "skill", map[string]any{})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected error for missing name, got %+v", res)
+	}
+}
+
+func TestSkillTool_UnknownSkill(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "deploy", "---\nname: deploy\ndescription: x\n---\nbody\n")
+	s := newSkillSession(t, root)
+
+	res := s.executeToolDirect(context.Background(), "skill", map[string]any{"name": "nope"})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected error for unknown skill, got %+v", res)
+	}
+}
+
+func TestSkillToolSchema_Shape(t *testing.T) {
+	schema := SkillToolSchema()
+	if schema.Name != "skill" {
+		t.Errorf("name = %q, want skill", schema.Name)
+	}
+	required, _ := schema.InputSchema["required"].([]string)
+	if len(required) != 1 || required[0] != "name" {
+		t.Errorf("required = %v, want [name]", required)
+	}
+}

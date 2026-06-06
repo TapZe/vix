@@ -289,6 +289,18 @@ type EventWorkflowsAvailable struct {
 	Workflows []WorkflowInfo `json:"workflows"`
 }
 
+// SkillInfo describes a loaded skill available for slash-command autocomplete.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// EventSkillsAvailable carries the list of loaded skills to the UI so they can
+// be offered as slash commands.
+type EventSkillsAvailable struct {
+	Skills []SkillInfo `json:"skills"`
+}
+
 // --- Workflow events ---
 
 // WorkflowStepInfo carries static metadata about a single workflow step.

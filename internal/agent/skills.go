@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -19,6 +20,7 @@ type Skill struct {
 	Model        string   // empty means inherit
 	Body         string   // raw markdown body (template)
 	Source       string   // "project" or "user"
+	Dir          string   // absolute path to the skill directory (contains SKILL.md)
 }
 
 // SkillRegistry holds all loaded skills keyed by name.
@@ -58,7 +60,8 @@ func (r *SkillRegistry) loadFrom(dir, source string) {
 			continue
 		}
 
-		skillFile := filepath.Join(dir, entry.Name(), "SKILL.md")
+		skillDir := filepath.Join(dir, entry.Name())
+		skillFile := filepath.Join(skillDir, "SKILL.md")
 		if _, err := os.Stat(skillFile); err != nil {
 			continue
 		}
@@ -73,6 +76,7 @@ func (r *SkillRegistry) loadFrom(dir, source string) {
 			skill.Name = entry.Name()
 		}
 		skill.Source = source
+		skill.Dir = skillDir
 
 		// Project skills take precedence — don't overwrite
 		if _, exists := r.skills[skill.Name]; !exists {
@@ -94,6 +98,30 @@ func (r *SkillRegistry) All() map[string]*Skill {
 // Count returns the number of loaded skills.
 func (r *SkillRegistry) Count() int {
 	return len(r.skills)
+}
+
+// BundledFiles returns the relative paths of supporting files in the skill
+// directory (everything except SKILL.md), sorted. These are the third level of
+// progressive disclosure: the agent reads them on demand via read_file/bash
+// using the absolute paths formed by joining Dir with each entry.
+func (s *Skill) BundledFiles() []string {
+	if s.Dir == "" {
+		return nil
+	}
+	var files []string
+	_ = filepath.WalkDir(s.Dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(s.Dir, path)
+		if relErr != nil || rel == "SKILL.md" {
+			return nil
+		}
+		files = append(files, rel)
+		return nil
+	})
+	sort.Strings(files)
+	return files
 }
 
 // parseSkillFile reads a SKILL.md file with YAML frontmatter.
@@ -163,6 +191,10 @@ var dynamicCmdPattern = regexp.MustCompile("!`([^`]+)`")
 func (s *Skill) RenderPrompt(rawArgs string) string {
 	result := s.Body
 
+	// Replace ${SKILL_DIR} with the skill's directory so the body can reference
+	// bundled files by absolute path.
+	result = strings.ReplaceAll(result, "${SKILL_DIR}", s.Dir)
+
 	// Replace $ARGUMENTS with the full argument string
 	result = strings.ReplaceAll(result, "$ARGUMENTS", rawArgs)
 
@@ -225,6 +257,23 @@ func splitArgs(s string) []string {
 	return args
 }
 
+// LoadForTool renders the skill body with the given arguments and appends a
+// listing of bundled supporting files (with absolute paths) so the agent can
+// choose to read them next. This is the payload returned by the `skill` tool —
+// the second level of progressive disclosure, with pointers to the third.
+func (s *Skill) LoadForTool(rawArgs string) string {
+	var sb strings.Builder
+	sb.WriteString(s.RenderPrompt(rawArgs))
+
+	if files := s.BundledFiles(); len(files) > 0 {
+		sb.WriteString("\n\n---\nBundled files (read with read_file or run with bash as needed):\n")
+		for _, f := range files {
+			sb.WriteString(fmt.Sprintf("- %s\n", filepath.Join(s.Dir, f)))
+		}
+	}
+	return sb.String()
+}
+
 // FormatSkillsList returns a formatted string listing all skills for display.
 func (r *SkillRegistry) FormatSkillsList() string {
 	if len(r.skills) == 0 {
@@ -254,14 +303,14 @@ func (r *SkillRegistry) FormatForSystemPrompt() string {
 
 	var sb strings.Builder
 	sb.WriteString("# Available Skills\n\n")
-	sb.WriteString("The following skills are available as slash commands. When a user's request matches a skill, suggest using it via the Skill tool or tell the user they can invoke it directly.\n\n")
+	sb.WriteString("Skills are reusable, task-specific instruction sets. Only their names and descriptions are listed below. When a user's request matches a skill, call the `skill` tool with that skill's name to load its full instructions (and any bundled reference files) into context. You can also tell the user they may invoke a skill directly by typing /<name>.\n\n")
 
 	for name, skill := range r.skills {
 		desc := skill.Description
 		if desc == "" {
 			desc = "(no description)"
 		}
-		sb.WriteString(fmt.Sprintf("- /%s: %s\n", name, desc))
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 	}
 
 	return sb.String()
