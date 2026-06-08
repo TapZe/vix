@@ -379,6 +379,18 @@ type EventSkillsAvailable struct {
 	Skills []SkillInfo `json:"skills"`
 }
 
+// EventUpdateAvailable informs the UI of the running version versus the latest
+// published GitHub release. Emitted once per session at init. Latest is empty
+// when the daemon is up-to-date, the check is disabled, or it could not reach
+// GitHub. Method is one of "brew" | "script" | "unknown" and selects the
+// in-app upgrade command the TUI offers.
+type EventUpdateAvailable struct {
+	Current string `json:"current"`
+	Latest  string `json:"latest,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Method  string `json:"method,omitempty"`
+}
+
 // --- Workflow events ---
 
 // WorkflowStepInfo carries static metadata about a single workflow step.

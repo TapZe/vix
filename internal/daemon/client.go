@@ -435,6 +435,15 @@ func (sc *SessionClient) SendCancel() error {
 	})
 }
 
+// SendUpdateQuit tells the daemon an in-app update finished installing: it
+// broadcasts a quit to every attached vix instance and shuts itself down so the
+// freshly-installed binaries take effect on relaunch.
+func (sc *SessionClient) SendUpdateQuit() error {
+	return sc.sendCommand(protocol.SessionCommand{
+		Type: "update.quit",
+	})
+}
+
 // SendClose ends the session.
 func (sc *SessionClient) SendClose() error {
 	err := sc.sendCommand(protocol.SessionCommand{

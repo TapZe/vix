@@ -5,9 +5,11 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/update"
 )
 
 // TabKind identifies the type of a tab.
@@ -165,7 +167,9 @@ func truncateLabel(s string, w int) string {
 type settingsItem int
 
 const (
-	settingShowThinking settingsItem = iota
+	settingUpdateAction settingsItem = iota
+	settingUpdateCheck
+	settingShowThinking
 	settingReadAgentsMD
 	settingReadClaudeMD
 	settingToolOrchestrator
@@ -186,6 +190,12 @@ type settingsState struct {
 	telemetry           bool
 	compactionAuto      bool
 	compactionThreshold float64
+	updateCheck         bool
+	updateCurrent       string
+	updateLatest        string // newer release tag, "" when up-to-date/unknown
+	updateMethod        string
+	updateInstalled     bool
+	updateErr           string
 }
 
 // toggleSetting flips (or, for the threshold row, leaves unchanged) the setting
@@ -214,8 +224,41 @@ func (m *Model) toggleSetting(item settingsItem) {
 		_ = config.SetTelemetryEnabled(!config.TelemetryEnabled())
 	case settingCompactionAuto:
 		_ = config.SetCompactionAuto(!config.CompactionAuto())
+	case settingUpdateCheck:
+		_ = config.SetUpdateCheckEnabled(!config.UpdateCheckEnabled())
 	case settingCompactionThreshold:
 		// Threshold is adjusted with ←/→, not toggled.
+	case settingUpdateAction:
+		// Handled in the Settings key handler (model.go), not here — it triggers
+		// an install/quit rather than flipping a persisted flag.
+	}
+}
+
+// handleUpdateAction runs the Settings "Updates" action row. Depending on
+// state it starts the install (in the foreground via ExecProcess, so sudo can
+// prompt), or — once installed — sends a quit-all so every vix instance and the
+// daemon exit and the new binaries take effect on relaunch. Returns nil when
+// there is nothing to do (up to date, or manual-only).
+func (m *Model) handleUpdateAction() tea.Cmd {
+	switch {
+	case m.updateInstalled:
+		if sess := m.currentSession(); sess != nil {
+			_ = sess.client.SendUpdateQuit()
+		}
+		return tea.Quit
+	case m.updateLatest == "":
+		return nil // up to date
+	case m.updateMethod == update.MethodUnknown:
+		return nil // manual instructions only — nothing to run
+	default:
+		cmd := update.InstallCommand(m.updateMethod, m.updateLatest)
+		if cmd == nil {
+			return nil
+		}
+		m.updateErr = ""
+		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return updateInstallDoneMsg{err: err}
+		})
 	}
 }
 
@@ -231,6 +274,23 @@ func (m *Model) adjustCompactionThreshold(delta float64) {
 	}
 	v = float64(int(v*20+0.5)) / 20 // round to nearest 0.05
 	_ = config.SetCompactionThreshold(v)
+}
+
+// updateActionLabel returns the text for the selectable Updates action row,
+// reflecting the current upgrade state.
+func updateActionLabel(st settingsState) string {
+	switch {
+	case st.updateErr != "":
+		return "⚠ Update failed — Enter to retry"
+	case st.updateInstalled:
+		return "⏻ Quit all & finish update"
+	case st.updateLatest == "":
+		return "✓ Up to date"
+	case st.updateMethod == "unknown":
+		return "Update manually: curl -fsSL https://getvix.dev/install.sh | bash"
+	default:
+		return "↓ Download & install " + st.updateLatest
+	}
 }
 
 // renderSettingsView renders the Settings tab content (global preferences).
@@ -285,6 +345,52 @@ func renderSettingsView(width, height int, s Styles, st settingsState) string {
 		lines = append(lines, titleStyle.Width(innerWidth).Render(name), sep)
 	}
 
+	// infoRow renders a non-selectable display line (does not advance idx).
+	infoRow := func(label, value string) {
+		lines = append(lines, dimStyle.Width(innerWidth).Render(fmt.Sprintf("  %-16s %s", label, value)))
+	}
+
+	updateAvail := st.updateLatest != ""
+	secondary := lipgloss.NewStyle().Foreground(colorSecondary)
+	secondaryBold := lipgloss.NewStyle().Bold(true).Foreground(colorSecondary)
+
+	// actionRow renders the selectable Updates action. When an update is
+	// available it is tinted with the secondary color to mirror the Sessions
+	// tab's new-activity highlight. Always occupies one cursor slot.
+	actionRow := func(text string, highlight bool) {
+		switch {
+		case idx == st.cursor && highlight:
+			lines = append(lines, secondaryBold.Width(innerWidth).Render("▸ "+text))
+		case idx == st.cursor:
+			lines = append(lines, titleStyle.Width(innerWidth).Render("▸ "+text))
+		case highlight:
+			lines = append(lines, secondary.Width(innerWidth).Render("  "+text))
+		default:
+			lines = append(lines, dimStyle.Width(innerWidth).Render("  "+text))
+		}
+		idx++
+	}
+
+	// Updates section — first, so a pending upgrade is the first thing seen. The
+	// title is tinted secondary when an update is available.
+	updTitle := titleStyle
+	if updateAvail {
+		updTitle = secondaryBold
+	}
+	lines = append(lines, updTitle.Width(innerWidth).Render("Updates"), sep)
+	current := st.updateCurrent
+	if current == "" {
+		current = Version
+	}
+	infoRow("Current version", current)
+	if updateAvail {
+		infoRow("Latest version", st.updateLatest+"  ← update available")
+	} else {
+		infoRow("Latest version", "up to date")
+	}
+	actionRow(updateActionLabel(st), updateAvail)
+	toggleRow("Check for updates daily", st.updateCheck)
+
 	section("Display")
 	toggleRow("Show extended thinking", st.showThinking)
 
@@ -302,7 +408,7 @@ func renderSettingsView(width, height int, s Styles, st settingsState) string {
 	toggleRow("Auto-compaction", st.compactionAuto)
 	sliderRow("Threshold       ", st.compactionThreshold)
 
-	lines = append(lines, "", dimStyle.Italic(true).Width(innerWidth).Render("↑↓ navigate · Enter toggle · ←→ adjust threshold"))
+	lines = append(lines, "", dimStyle.Italic(true).Width(innerWidth).Render("↑↓ navigate · Enter toggle/select · ←→ adjust threshold"))
 
 	content := strings.Join(lines, "\n")
 	return s.ViewportFocusedStyle.Width(width).Height(height).Render(content)
@@ -686,7 +792,7 @@ const keyValNotAvailable = "(not available)"
 // tab title then blinks (alertBlinkOn is the current blink phase). When no alert
 // is active but unseen is true (a message arrived while the Sessions tab was not
 // focused), the Sessions title is tinted secondary statically (no blink).
-func renderTabBar(activeTab TabKind, width int, s Styles, viewportFocused bool, alertActive bool, alertBlinkOn bool, unseen bool) string {
+func renderTabBar(activeTab TabKind, width int, s Styles, viewportFocused bool, alertActive bool, alertBlinkOn bool, unseen bool, updateAvailable bool) string {
 	type tabDef struct {
 		label string
 		kind  TabKind
@@ -740,6 +846,10 @@ func renderTabBar(activeTab TabKind, width int, s Styles, viewportFocused bool, 
 			}
 		case d.kind == TabKindSessions && unseen:
 			// Unseen activity: static secondary tint (superseded by the blink above).
+			textStyle = s.TabAlertStyle
+		case d.kind == TabKindSettings && updateAvailable:
+			// A newer release is available: static secondary tint, mirroring the
+			// Sessions tab's unseen-activity highlight.
 			textStyle = s.TabAlertStyle
 		default:
 			textStyle = s.TabInactiveStyle

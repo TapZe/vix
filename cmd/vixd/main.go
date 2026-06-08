@@ -18,6 +18,7 @@ import (
 	"github.com/get-vix/vix/internal/daemon/brain"
 	"github.com/get-vix/vix/internal/providers"
 	"github.com/get-vix/vix/internal/telemetry"
+	"github.com/get-vix/vix/internal/update"
 	"github.com/google/uuid"
 )
 
@@ -168,6 +169,15 @@ func main() {
 
 	server := daemon.NewServer(*socketPathFlag, cred, sessionID, model, daemonConfig, pluginCfg)
 	server.SetExitWithClients(*exitWithClients)
+	// Background once-per-day update check. Best-effort: stores the result on
+	// the server so sessions can surface it; never blocks startup.
+	go func() {
+		st := update.RunDailyCheck(Version, pluginPaths.StateFile(), update.LatestRelease)
+		server.SetUpdateStatus(st.Current, st.Latest, st.URL, st.Method)
+		if st.Latest != "" {
+			log.Printf("update available: %s (current %s)", st.Latest, st.Current)
+		}
+	}()
 	daemon.RegisterBuiltinHandlers(server)
 	brain.RegisterBrainHandlers(func(cmd string, handler func(map[string]any) (map[string]any, error)) {
 		server.RegisterHandler(cmd, handler)

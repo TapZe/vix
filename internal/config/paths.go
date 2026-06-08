@@ -229,6 +229,20 @@ func (p VixPaths) ProjectSettingsWrite() string {
 	return filepath.Join(p.Primary(), "settings.json")
 }
 
+// StateFile returns the path to the global session-state file (state.json),
+// used for cross-session bookkeeping that is not project-scoped — e.g. the
+// once-per-day update-check record. Override mode: override/state.json. Normal
+// mode: home/state.json (empty when home is unavailable).
+func (p VixPaths) StateFile() string {
+	if p.override != "" {
+		return filepath.Join(p.override, "state.json")
+	}
+	if p.home == "" {
+		return ""
+	}
+	return filepath.Join(p.home, "state.json")
+}
+
 func (p VixPaths) subdirs(name string) []string {
 	layers := p.Layers()
 	out := make([]string, len(layers))

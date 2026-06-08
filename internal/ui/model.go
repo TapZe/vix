@@ -47,6 +47,13 @@ type sessionDisconnectedMsg struct {
 	daemonSessionID string
 }
 
+// updateInstallDoneMsg is delivered after the in-app update install command
+// (run via tea.ExecProcess) finishes. A nil err means the new binaries are on
+// disk and the user can quit-all to apply them.
+type updateInstallDoneMsg struct {
+	err error
+}
+
 // reconnectSuccessMsg is sent when reconnection succeeds.
 // daemonSessionID is the ID of the session we were reconnecting for (the old
 // one); client is the newly established connection with its own fresh ID.
@@ -344,6 +351,15 @@ type Model struct {
 	cfg            *config.Config
 	testMode       bool
 	settingsCursor int // selected row in the Settings tab
+
+	// Update status (from the daemon's daily release check, via
+	// event.update_available) and in-app upgrade flow state.
+	updateCurrent   string // running version
+	updateLatest    string // newer release tag, "" when up-to-date/unknown
+	updateURL       string
+	updateMethod    string // "brew" | "script" | "unknown"
+	updateInstalled bool   // install command completed successfully
+	updateErr       string // last install error, if any
 
 	// restoreSessions holds persisted open sessions (beyond the first, which is
 	// the initial client) to reopen on Init.
@@ -710,7 +726,13 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.settingsCursor++
 				}
 			case "enter", " ":
-				m.toggleSetting(settingsItem(m.settingsCursor))
+				if settingsItem(m.settingsCursor) == settingUpdateAction {
+					if cmd := m.handleUpdateAction(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				} else {
+					m.toggleSetting(settingsItem(m.settingsCursor))
+				}
 			case "left", "h":
 				if settingsItem(m.settingsCursor) == settingCompactionThreshold {
 					m.adjustCompactionThreshold(-0.05)
@@ -1135,6 +1157,16 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.modelsLoginStatus = "Logged in to " + msg.provider + "."
 			}
+		}
+		return m, nil
+
+	case updateInstallDoneMsg:
+		if msg.err != nil {
+			m.updateErr = msg.err.Error()
+			m.updateInstalled = false
+		} else {
+			m.updateInstalled = true
+			m.updateErr = ""
 		}
 		return m, nil
 
@@ -2018,6 +2050,15 @@ func (m *Model) applyEventToSession(idx int, event protocol.SessionEvent) []tea.
 		json.Unmarshal(data, &sa)
 		sess.skills = sa.Skills
 
+	case "event.update_available":
+		data := marshalData(event.Data)
+		var ua protocol.EventUpdateAvailable
+		json.Unmarshal(data, &ua)
+		m.updateCurrent = ua.Current
+		m.updateLatest = ua.Latest
+		m.updateURL = ua.URL
+		m.updateMethod = ua.Method
+
 	case "event.stream_chunk":
 		data := marshalData(event.Data)
 		var chunk protocol.EventStreamChunk
@@ -2349,7 +2390,7 @@ func (m Model) View() tea.View {
 	if m.activeTab == TabKindSessions || m.activeTab == TabKindModels || m.activeTab == TabKindSettings {
 		tabBarWidth = m.width
 	}
-	tabBar := renderTabBar(m.activeTab, tabBarWidth, m.styles, viewportFocused, m.hasAlertSessions(), m.tabAlertBlinkOn, m.sessionsTabUnseen)
+	tabBar := renderTabBar(m.activeTab, tabBarWidth, m.styles, viewportFocused, m.hasAlertSessions(), m.tabAlertBlinkOn, m.sessionsTabUnseen, m.updateLatest != "")
 	uv.NewStyledString(tabBar).Draw(canvas, image.Rect(0, y, tabBarWidth, y+layout.TabBarHeight))
 	y += layout.TabBarHeight
 
@@ -2496,6 +2537,12 @@ func (m Model) View() tea.View {
 			telemetry:           config.TelemetryEnabled(),
 			compactionAuto:      config.CompactionAuto(),
 			compactionThreshold: config.CompactionThreshold(),
+			updateCheck:         config.UpdateCheckEnabled(),
+			updateCurrent:       m.updateCurrent,
+			updateLatest:        m.updateLatest,
+			updateMethod:        m.updateMethod,
+			updateInstalled:     m.updateInstalled,
+			updateErr:           m.updateErr,
 		}
 		if settSess := m.currentSession(); settSess != nil {
 			st.showThinking = settSess.showThinking

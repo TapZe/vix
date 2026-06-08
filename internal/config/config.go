@@ -173,6 +173,15 @@ func TelemetryEnabled() bool { return feature("telemetry", true) }
 // SetTelemetryEnabled writes the telemetry feature flag to ~/.vix/settings.json.
 func SetTelemetryEnabled(v bool) error { return setFeature("telemetry", v) }
 
+// UpdateCheckEnabled reads the update_check feature flag from
+// ~/.vix/settings.json. Returns true if the flag is absent (opt-out model): the
+// daemon checks GitHub for newer releases at most once per day unless disabled.
+func UpdateCheckEnabled() bool { return feature("update_check", true) }
+
+// SetUpdateCheckEnabled writes the update_check feature flag to
+// ~/.vix/settings.json.
+func SetUpdateCheckEnabled(v bool) error { return setFeature("update_check", v) }
+
 // ShowThinking reads the show_thinking feature flag from ~/.vix/settings.json.
 // Returns false if the flag is absent (opt-in: thinking is hidden by default).
 func ShowThinking() bool { return feature("show_thinking", false) }

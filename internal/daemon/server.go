@@ -81,6 +81,62 @@ type Server struct {
 	// cancel cancels serverCtx; set in ListenAndServe so internal triggers
 	// (e.g. exit-with-clients) can initiate a graceful shutdown.
 	cancel context.CancelFunc
+
+	// Update status: the latest GitHub release seen by the once-per-day check,
+	// versus the running daemon Version. Populated by a background goroutine in
+	// vixd's main and read when emitting event.update_available at session init.
+	// Guarded by mu.
+	updateCurrent string
+	updateLatest  string // "" when up-to-date / check disabled / unreachable
+	updateURL     string
+	updateMethod  string
+}
+
+// SetUpdateStatus records the result of the daily release check so it can be
+// emitted to every session at init. Safe for concurrent use.
+func (s *Server) SetUpdateStatus(current, latest, url, method string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateCurrent = current
+	s.updateLatest = latest
+	s.updateURL = url
+	s.updateMethod = method
+}
+
+// UpdateStatus returns the last recorded release-check result.
+func (s *Server) UpdateStatus() (current, latest, url, method string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.updateCurrent, s.updateLatest, s.updateURL, s.updateMethod
+}
+
+// BroadcastEvent pushes ev onto every live session's event channel (best-effort,
+// non-blocking). Used to reach all attached TUIs at once — e.g. the coordinated
+// quit-all that follows an in-app update.
+func (s *Server) BroadcastEvent(ev protocol.SessionEvent) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	for _, sess := range s.sessions {
+		select {
+		case sess.eventChan <- ev:
+		default:
+		}
+	}
+}
+
+// QuitAll tells every attached vix instance to quit, then shuts the daemon
+// down. Invoked after an in-app update so all old processes exit and the
+// freshly-installed binaries take effect on relaunch (brew keep_alive restart
+// or vix auto-spawn). The short delay lets the per-session writer goroutines
+// flush the quit event onto their sockets before the context is cancelled.
+func (s *Server) QuitAll() {
+	LogInfo("update: broadcasting quit to all sessions, then shutting down")
+	s.BroadcastEvent(protocol.SessionEvent{Type: "event.quit"})
+	time.AfterFunc(500*time.Millisecond, func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+	})
 }
 
 // NewServer creates a new daemon server.
@@ -583,6 +639,14 @@ func (s *Server) handleSession(conn net.Conn, scanner *bufio.Scanner, startCmd p
 				}
 				// Do not forward to commandChan — the workflow loop polls workflowMsgChan directly
 				continue
+			}
+
+			if cmd.Type == "update.quit" {
+				// An in-app update finished installing in the initiating TUI.
+				// Tell every attached instance to quit and shut the daemon
+				// down so the new binaries take effect on relaunch.
+				s.QuitAll()
+				return
 			}
 
 			select {

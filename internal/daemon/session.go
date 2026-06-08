@@ -797,6 +797,14 @@ func (s *Session) initBrain() {
 	s.emit("event.skills_available", protocol.EventSkillsAvailable{
 		Skills: s.skillInfoList(),
 	})
+	if cur, latest, url, method := s.server.UpdateStatus(); latest != "" {
+		s.emit("event.update_available", protocol.EventUpdateAvailable{
+			Current: cur,
+			Latest:  latest,
+			URL:     url,
+			Method:  method,
+		})
+	}
 }
 
 // skillInfoList returns the loaded skills as name/description pairs, sorted by
