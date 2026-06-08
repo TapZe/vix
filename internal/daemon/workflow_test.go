@@ -143,7 +143,7 @@ func TestValidateWorkflow(t *testing.T) {
 				Name:       "Test Plan",
 				EntryPoint: StepRef{ID: "step1"},
 				Steps: map[string]WorkflowStepDef{
-					"step1":  {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
+					"step1": {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
 					"review": {Type: "tool", Tool: "ask_question_to_user", Options: []StepOption{
 						{Title: "Accept", Description: "Approve", Steps: []StepRef{{ID: "step1"}}},
 						{Title: "Reject", Description: "Reject", Steps: []StepRef{{ID: "stop"}}},
@@ -169,7 +169,7 @@ func TestValidateWorkflow(t *testing.T) {
 				Name:       "Test Plan",
 				EntryPoint: StepRef{ID: "step1"},
 				Steps: map[string]WorkflowStepDef{
-					"step1":  {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
+					"step1": {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
 					"review": {Type: "tool", Tool: "ask_question_to_user", Options: []StepOption{
 						{Title: "Accept", Description: "Approve", Steps: []StepRef{{ID: "nonexistent"}}},
 					}},
@@ -183,7 +183,7 @@ func TestValidateWorkflow(t *testing.T) {
 				Name:       "Test Plan",
 				EntryPoint: StepRef{ID: "step1"},
 				Steps: map[string]WorkflowStepDef{
-					"step1":  {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
+					"step1": {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
 					"review": {Type: "tool", Tool: "ask_question_to_user", Options: []StepOption{
 						{Title: "Reject", Description: "Reject the plan", Steps: []StepRef{{ID: "stop"}}},
 					}},
@@ -197,7 +197,7 @@ func TestValidateWorkflow(t *testing.T) {
 				Name:       "Test Plan",
 				EntryPoint: StepRef{ID: "step1"},
 				Steps: map[string]WorkflowStepDef{
-					"step1":  {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
+					"step1": {Type: "agent", Agent: "planner", Prompt: "do something", NextSteps: []StepRef{{ID: "review"}}},
 					"review": {Type: "tool", Tool: "ask_question_to_user", Options: []StepOption{
 						{Title: "Accept", Description: "Approve", Steps: []StepRef{{ID: "step1"}}},
 						{Title: "Modify", Description: "Provide feedback", Steps: []StepRef{{ID: "step1"}}, HasUserInput: true},
@@ -368,15 +368,14 @@ func TestResolveParams(t *testing.T) {
 	}
 }
 
-// ── LoadWorkflows ──
+// ── LoadWorkflowsFile ──
 
 func TestLoadWorkflows(t *testing.T) {
 	t.Run("valid config", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "settings.json")
+		path := filepath.Join(dir, "workflow.json")
 
-		cfg := configFile{
-			Version: CurrentConfigVersion,
+		cfg := workflowsFile{
 			Workflows: []WorkflowDef{
 				{
 					Name:       "My Plan",
@@ -390,7 +389,7 @@ func TestLoadWorkflows(t *testing.T) {
 		data, _ := json.Marshal(cfg)
 		os.WriteFile(path, data, 0644)
 
-		result := LoadWorkflows(path)
+		result := LoadWorkflowsFile(path)
 		if len(result) != 1 {
 			t.Fatalf("expected 1 workflow, got %d", len(result))
 		}
@@ -400,18 +399,24 @@ func TestLoadWorkflows(t *testing.T) {
 	})
 
 	t.Run("missing file returns empty", func(t *testing.T) {
-		result := LoadWorkflows("/nonexistent/path/settings.json")
+		result := LoadWorkflowsFile("/nonexistent/path/workflow.json")
 		if len(result) != 0 {
 			t.Errorf("expected empty result for missing file, got %d", len(result))
 		}
 	})
 
+	t.Run("empty path returns empty", func(t *testing.T) {
+		if result := LoadWorkflowsFile(""); len(result) != 0 {
+			t.Errorf("expected empty result for empty path, got %d", len(result))
+		}
+	})
+
 	t.Run("invalid JSON returns empty", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "settings.json")
+		path := filepath.Join(dir, "workflow.json")
 		os.WriteFile(path, []byte("not json"), 0644)
 
-		result := LoadWorkflows(path)
+		result := LoadWorkflowsFile(path)
 		if len(result) != 0 {
 			t.Errorf("expected empty result for invalid JSON, got %d", len(result))
 		}
@@ -419,10 +424,9 @@ func TestLoadWorkflows(t *testing.T) {
 
 	t.Run("invalid workflow skipped", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "settings.json")
+		path := filepath.Join(dir, "workflow.json")
 
-		cfg := configFile{
-			Version: CurrentConfigVersion,
+		cfg := workflowsFile{
 			Workflows: []WorkflowDef{
 				{
 					// Missing name → invalid
@@ -436,7 +440,7 @@ func TestLoadWorkflows(t *testing.T) {
 		data, _ := json.Marshal(cfg)
 		os.WriteFile(path, data, 0644)
 
-		result := LoadWorkflows(path)
+		result := LoadWorkflowsFile(path)
 		if len(result) != 0 {
 			t.Errorf("expected 0 workflows (invalid skipped), got %d", len(result))
 		}
@@ -444,10 +448,9 @@ func TestLoadWorkflows(t *testing.T) {
 
 	t.Run("preserves config order", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "settings.json")
+		path := filepath.Join(dir, "workflow.json")
 
-		cfg := configFile{
-			Version: CurrentConfigVersion,
+		cfg := workflowsFile{
 			Workflows: []WorkflowDef{
 				{
 					Name:       "Workflow B",
@@ -468,7 +471,7 @@ func TestLoadWorkflows(t *testing.T) {
 		data, _ := json.Marshal(cfg)
 		os.WriteFile(path, data, 0644)
 
-		result := LoadWorkflows(path)
+		result := LoadWorkflowsFile(path)
 		if len(result) != 2 {
 			t.Fatalf("expected 2 workflows, got %d", len(result))
 		}
@@ -479,27 +482,48 @@ func TestLoadWorkflows(t *testing.T) {
 			t.Errorf("expected second workflow 'Workflow A', got %q", result[1].Name)
 		}
 	})
+
+	t.Run("duplicate names disambiguated", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "workflow.json")
+
+		cfg := workflowsFile{
+			Workflows: []WorkflowDef{
+				{
+					Name:       "Plan",
+					EntryPoint: StepRef{ID: "s1"},
+					Steps:      map[string]WorkflowStepDef{"s1": {Type: "agent", Agent: "a", Prompt: "x"}},
+				},
+				{
+					Name:       "Plan",
+					EntryPoint: StepRef{ID: "s1"},
+					Steps:      map[string]WorkflowStepDef{"s1": {Type: "agent", Agent: "a", Prompt: "x"}},
+				},
+			},
+		}
+		data, _ := json.Marshal(cfg)
+		os.WriteFile(path, data, 0644)
+
+		result := LoadWorkflowsFile(path)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 workflows, got %d", len(result))
+		}
+		if result[0].Name == result[1].Name {
+			t.Errorf("expected disambiguated names, both are %q", result[0].Name)
+		}
+	})
 }
 
 // ── LoadProjectConfig ──
 
 func TestLoadProjectConfig(t *testing.T) {
-	t.Run("loads agent and workflows", func(t *testing.T) {
+	t.Run("loads agent", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "settings.json")
 
 		cfg := configFile{
 			Version: CurrentConfigVersion,
 			Agent:   "custom",
-			Workflows: []WorkflowDef{
-				{
-					Name:       "My Workflow",
-					EntryPoint: StepRef{ID: "s1"},
-					Steps: map[string]WorkflowStepDef{
-						"s1": {Type: "agent", Agent: "planner", Prompt: "plan it"},
-					},
-				},
-			},
 		}
 		data, _ := json.Marshal(cfg)
 		os.WriteFile(path, data, 0644)
@@ -508,9 +532,6 @@ func TestLoadProjectConfig(t *testing.T) {
 		if result.Agent != "custom" {
 			t.Errorf("expected agent 'custom', got %q", result.Agent)
 		}
-		if len(result.Workflows) != 1 {
-			t.Fatalf("expected 1 workflow, got %d", len(result.Workflows))
-		}
 	})
 
 	t.Run("defaults to general agent", func(t *testing.T) {
@@ -518,8 +539,7 @@ func TestLoadProjectConfig(t *testing.T) {
 		path := filepath.Join(dir, "settings.json")
 
 		cfg := configFile{
-			Version:   CurrentConfigVersion,
-			Workflows: []WorkflowDef{},
+			Version: CurrentConfigVersion,
 		}
 		data, _ := json.Marshal(cfg)
 		os.WriteFile(path, data, 0644)
@@ -535,9 +555,6 @@ func TestLoadProjectConfig(t *testing.T) {
 		if result.Agent != "general" {
 			t.Errorf("expected default agent 'general', got %q", result.Agent)
 		}
-		if len(result.Workflows) != 0 {
-			t.Errorf("expected empty workflows, got %d", len(result.Workflows))
-		}
 	})
 
 	t.Run("version mismatch skips config", func(t *testing.T) {
@@ -547,15 +564,6 @@ func TestLoadProjectConfig(t *testing.T) {
 		cfg := configFile{
 			Version: 999,
 			Agent:   "custom",
-			Workflows: []WorkflowDef{
-				{
-					Name:       "Skipped",
-					EntryPoint: StepRef{ID: "s1"},
-					Steps: map[string]WorkflowStepDef{
-						"s1": {Type: "agent", Agent: "planner", Prompt: "plan it"},
-					},
-				},
-			},
 		}
 		data, _ := json.Marshal(cfg)
 		os.WriteFile(path, data, 0644)
@@ -563,9 +571,6 @@ func TestLoadProjectConfig(t *testing.T) {
 		result := LoadProjectConfig(path)
 		if result.Agent != "general" {
 			t.Errorf("expected default agent 'general' (config skipped), got %q", result.Agent)
-		}
-		if len(result.Workflows) != 0 {
-			t.Errorf("expected 0 workflows (config skipped), got %d", len(result.Workflows))
 		}
 	})
 
@@ -764,6 +769,129 @@ func TestLoadProjectConfigToolTimeouts(t *testing.T) {
 		result := LoadProjectConfig(homePath, projectPath)
 		// Home set default=90, max=450; project overrode max to 300 only.
 		expectBounds(t, result.ToolTimeouts, 90*time.Second, 300*time.Second)
+	})
+}
+
+// ── LoadProjectConfig: compaction block ──
+
+func TestLoadProjectConfigCompaction(t *testing.T) {
+	writeSettings := func(t *testing.T, path string, cfg configFile) {
+		t.Helper()
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	fp := func(v float64) *float64 { return &v }
+	bp := func(v bool) *bool { return &v }
+	ip := func(v int) *int { return &v }
+
+	expect := func(t *testing.T, got Compaction, threshold float64, auto bool, keepN int, keepRatio float64) {
+		t.Helper()
+		if got.Threshold != threshold || got.Auto != auto || got.KeepLastNTurns != keepN || got.KeepRatio != keepRatio {
+			t.Errorf("Compaction = %+v, want {Threshold:%v Auto:%v KeepLastNTurns:%v KeepRatio:%v}",
+				got, threshold, auto, keepN, keepRatio)
+		}
+	}
+
+	t.Run("absent block falls back to defaults", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeSettings(t, path, configFile{Version: CurrentConfigVersion})
+
+		result := LoadProjectConfig(path)
+		expect(t, result.Compaction, defaultCompactionThreshold, defaultCompactionAuto, defaultCompactionKeepLastN, defaultCompactionKeepRatio)
+	})
+
+	t.Run("full valid block is honored", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeSettings(t, path, configFile{
+			Version:    CurrentConfigVersion,
+			Compaction: &compactionFile{Threshold: fp(0.6), Auto: bp(false), KeepLastNTurns: ip(4)},
+		})
+
+		result := LoadProjectConfig(path)
+		expect(t, result.Compaction, 0.6, false, 4, defaultCompactionKeepRatio)
+	})
+
+	t.Run("partial block: only threshold set, others inherit defaults", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeSettings(t, path, configFile{
+			Version:    CurrentConfigVersion,
+			Compaction: &compactionFile{Threshold: fp(0.5)},
+		})
+
+		result := LoadProjectConfig(path)
+		expect(t, result.Compaction, 0.5, defaultCompactionAuto, defaultCompactionKeepLastN, defaultCompactionKeepRatio)
+	})
+
+	t.Run("invalid threshold is ignored", func(t *testing.T) {
+		for _, bad := range []float64{0, 1.5, -0.2} {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "settings.json")
+			writeSettings(t, path, configFile{
+				Version:    CurrentConfigVersion,
+				Compaction: &compactionFile{Threshold: fp(bad)},
+			})
+
+			result := LoadProjectConfig(path)
+			if result.Compaction.Threshold != defaultCompactionThreshold {
+				t.Errorf("threshold %v: got %v, want default %v", bad, result.Compaction.Threshold, defaultCompactionThreshold)
+			}
+		}
+	})
+
+	t.Run("threshold of 1 is valid (inclusive)", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeSettings(t, path, configFile{
+			Version:    CurrentConfigVersion,
+			Compaction: &compactionFile{Threshold: fp(1)},
+		})
+
+		result := LoadProjectConfig(path)
+		if result.Compaction.Threshold != 1 {
+			t.Errorf("threshold = %v, want 1", result.Compaction.Threshold)
+		}
+	})
+
+	t.Run("keep_last_n_turns below -1 is clamped to -1", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.json")
+		writeSettings(t, path, configFile{
+			Version:    CurrentConfigVersion,
+			Compaction: &compactionFile{KeepLastNTurns: ip(-5)},
+		})
+
+		result := LoadProjectConfig(path)
+		if result.Compaction.KeepLastNTurns != -1 {
+			t.Errorf("KeepLastNTurns = %v, want -1", result.Compaction.KeepLastNTurns)
+		}
+	})
+
+	t.Run("multi-file: later override wins field-by-field", func(t *testing.T) {
+		homeDir := t.TempDir()
+		projectDir := t.TempDir()
+		homePath := filepath.Join(homeDir, "settings.json")
+		projectPath := filepath.Join(projectDir, "settings.json")
+
+		writeSettings(t, homePath, configFile{
+			Version:    CurrentConfigVersion,
+			Compaction: &compactionFile{Auto: bp(false)},
+		})
+		writeSettings(t, projectPath, configFile{
+			Version:    CurrentConfigVersion,
+			Compaction: &compactionFile{Threshold: fp(0.6)},
+		})
+
+		result := LoadProjectConfig(homePath, projectPath)
+		// Home disabled auto; project set threshold only — both apply.
+		expect(t, result.Compaction, 0.6, false, defaultCompactionKeepLastN, defaultCompactionKeepRatio)
 	})
 }
 
@@ -1065,10 +1193,10 @@ func TestResolveBashStepTimeout(t *testing.T) {
 	cfg := BashStepTimeouts{Default: 300 * time.Second, Max: 600 * time.Second}
 
 	cases := []struct {
-		name    string
-		step    *int
-		cfg     BashStepTimeouts
-		want    time.Duration
+		name string
+		step *int
+		cfg  BashStepTimeouts
+		want time.Duration
 	}{
 		{"absent override uses default", nil, cfg, 300 * time.Second},
 		{"positive override wins", ip(30), cfg, 30 * time.Second},

@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	vixconfig "github.com/kirby88/vix/internal/config"
-	"github.com/kirby88/vix/internal/daemon/llm"
-	promptloader "github.com/kirby88/vix/internal/daemon/prompt"
-	"github.com/kirby88/vix/internal/protocol"
+	vixconfig "github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/daemon/llm"
+	promptloader "github.com/get-vix/vix/internal/daemon/prompt"
+	"github.com/get-vix/vix/internal/protocol"
 )
 
 // SubagentConfig defines how a subagent behaves.
@@ -115,9 +115,7 @@ func RunSubagent(
 	}
 	client, err := llm.NewFromModel(model, PluginConfig{}, effort, int64(config.MaxTokens))
 	if err != nil {
-		// Fall back to Anthropic adapter with the caller-provided credential
-		// when the model spec can't be resolved (e.g. missing provider key).
-		client = NewLLM(cred, model, effort, int64(config.MaxTokens), PluginConfig{})
+		return nil, fmt.Errorf("cannot run subagent: %w", err)
 	}
 	tools := FilterToolSchemasWithBounds(config.Tools, toolTimeoutDefault, toolTimeoutMax)
 

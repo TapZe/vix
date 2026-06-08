@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/kirby88/vix/internal/daemon/llm"
+	"github.com/get-vix/vix/internal/daemon/llm"
 	"github.com/openai/openai-go"
 )
 

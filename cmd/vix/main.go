@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -9,22 +8,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
-	"github.com/kirby88/vix/internal/config"
-	"github.com/kirby88/vix/internal/daemon"
-	"github.com/kirby88/vix/internal/telemetry"
-	"github.com/kirby88/vix/internal/daemon/brain"
-	"github.com/kirby88/vix/internal/headless"
+	"github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/daemon"
+	"github.com/get-vix/vix/internal/daemon/brain"
+	"github.com/get-vix/vix/internal/headless"
+	"github.com/get-vix/vix/internal/protocol"
+	"github.com/get-vix/vix/internal/providers"
+	"github.com/get-vix/vix/internal/telemetry"
 
-	"github.com/kirby88/vix/internal/ui"
-	"github.com/mattn/go-isatty"
+	"github.com/get-vix/vix/internal/ui"
 )
 
 // Version is set at build time via -ldflags.
@@ -161,36 +161,25 @@ func main() {
 	// Pre-flight credential resolution. The session resolves the actual
 	// per-provider credential when the daemon constructs the LLM (based on
 	// the active chat agent's `model:` frontmatter); this check just makes
-	// sure the user has at least one usable key configured and offers a
-	// first-run interactive prompt for ANTHROPIC_API_KEY when none is set.
-	// Users on non-Anthropic providers must set their provider's env var
-	// (OPENAI_API_KEY / OPENROUTER_API_KEY / MINIMAX_API_KEY / MIMO_API_KEY)
-	// themselves.
+	// sure the user has at least one usable key configured, failing fast in
+	// headless mode when none is set. In interactive mode a missing credential
+	// for the selected model is surfaced as an error in the UI by the daemon.
+	// Users must set their provider's env var (ANTHROPIC_API_KEY /
+	// CLAUDE_CODE_OAUTH_TOKEN / OPENAI_API_KEY / OPENROUTER_API_KEY /
+	// MINIMAX_API_KEY / MIMO_API_KEY) themselves.
 	var apiKey string
-	apiKey, _ = config.ResolveProviderKey("anthropic", true) // also accepts CLAUDE_CODE_OAUTH_TOKEN
+	apiKey, _ = config.ResolveProviderKey("anthropic") // includes CLAUDE_CODE_OAUTH_TOKEN fallback
 	hasNonAnthropicKey := func() bool {
 		for _, p := range []string{"bedrock", "openai", "openrouter", "minimax", "mimo"} {
-			if k, _ := config.ResolveProviderKey(p, false); k != "" {
+			if k, _ := config.ResolveProviderKey(p); k != "" {
 				return true
 			}
 		}
 		return false
 	}
-	if apiKey == "" && !hasNonAnthropicKey() {
-		isHeadless := *prompt != ""
-		if isHeadless {
-			fmt.Fprintf(os.Stderr, "Error: no API key found. Set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY, or MIMO_API_KEY.\n")
-			os.Exit(1)
-		}
-		if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
-			apiKey = promptAPIKey()
-			if apiKey != "" {
-				if err := config.StoreProviderKey("anthropic", apiKey); err != nil {
-					warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-					fmt.Fprintf(os.Stderr, "%s %v\n", warnStyle.Render("Warning: could not save key to keychain:"), err)
-				}
-			}
-		}
+	if apiKey == "" && !hasNonAnthropicKey() && *prompt != "" {
+		fmt.Fprintf(os.Stderr, "Error: no API key found. Set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY, or MIMO_API_KEY.\n")
+		os.Exit(1)
 	}
 
 	cfg, err := config.Load(*forceInit, *workdir, *configDir, *socketPath)
@@ -212,18 +201,45 @@ func main() {
 		}
 	}
 
+	// Load the data-driven provider/model registry so the model picker reflects
+	// embedded defaults plus any ~/.vix and ./.vix providers.json overlays. On
+	// error, fall back to the embedded defaults.
+	if err := providers.Configure(cfg.Paths.Providers()); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: providers config failed, using embedded defaults: %v\n", err)
+	}
+
 	appMode := "tui"
 	if *prompt != "" {
 		appMode = "headless"
 	}
 	telemetry.Init(telemetry.Config{Version: Version, Mode: appMode, Enabled: config.TelemetryEnabled()})
 	defer telemetry.Shutdown()
+	// Top-level crash handler: capture the panic as a PostHog exception and
+	// flush synchronously (Shutdown is bounded by ShutdownTimeout) before the
+	// process dies, then re-panic to preserve Go's crash output and exit code.
+	// Registered after the Shutdown defer so it runs first on unwind; the
+	// later Shutdown is a no-op (closeOnce). Only catches main-goroutine panics.
+	defer func() {
+		if r := recover(); r != nil {
+			telemetry.TrackPanic("vix.main", r, debug.Stack())
+			telemetry.Shutdown()
+			panic(r)
+		}
+	}()
 	telemetry.TrackTUIStarted(appMode, Version)
 	ui.Version = Version
 
 	var session *daemon.SessionClient
 
-	var daemonCmd *exec.Cmd
+	// restoreSessions holds the persisted open sessions (beyond the first,
+	// which becomes the initial client) that the TUI reopens on Init.
+	var restoreSessions []protocol.SessionSummary
+
+	// initialAttached is true when the initial session client resumed a
+	// persisted session (Attach) rather than starting fresh (Connect). The TUI
+	// uses it to show a "Restoring conversation…" placeholder until the replay
+	// arrives, instead of flashing the welcome screen.
+	var initialAttached bool
 
 	// Load the socket auth token (if -auth-token-path was given) once,
 	// before any daemon RPC. Same file the spawned vixd will read on the
@@ -248,65 +264,73 @@ func main() {
 		client := daemon.NewClient(cfg.SocketPath)
 		client.SetAuthToken(authToken)
 		if !client.Ping() {
-			if *prompt != "" {
-				// Headless mode: auto-start silently
-				var err error
-				daemonCmd, err = startDaemon(apiKey, resolvedLogDir, cfg.SocketPath, *authTokenPath)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
-					os.Exit(1)
-				}
-				if !waitForDaemon(client, 5*time.Second) {
-					fmt.Fprintf(os.Stderr, "Error: daemon did not start in time\n")
-					os.Exit(1)
-				}
-			} else {
-				// Interactive mode: ask the user
-				choice := promptDaemonChoice()
-				if choice == 1 {
-					var err error
-					daemonCmd, err = startDaemon(apiKey, resolvedLogDir, cfg.SocketPath, *authTokenPath)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
-						os.Exit(1)
-					}
-					if !waitForDaemon(client, 5*time.Second) {
-						fmt.Fprintf(os.Stderr, "Error: daemon did not start in time\n")
-						os.Exit(1)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "Start the daemon manually with:\n  vix-daemon\n\n")
-				}
+			// No daemon answered the ping — spawn a detached, long-lived daemon
+			// (silently, in both interactive and headless mode). It is NOT tied
+			// to this client's lifecycle: it runs in its own session (setsid) and
+			// survives this process exiting, so other clients sharing it keep
+			// working. It self-terminates once its last attached vix instance
+			// disconnects (--exit-with-clients; see startDaemon). An already
+			// running daemon is reused.
+			if _, err := startDaemon(apiKey, resolvedLogDir, cfg.SocketPath, *authTokenPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+				os.Exit(1)
+			}
+			if !waitForDaemon(client, 5*time.Second) {
+				fmt.Fprintf(os.Stderr, "Error: daemon did not start in time\n")
+				os.Exit(1)
 			}
 		}
 
 		// Connect session if daemon is running
 		if client.Ping() {
+			// Register this vix process as an attached instance for its whole
+			// lifetime. The daemon counts these (independently of sessions) so a
+			// vix-spawned daemon can shut down once its last client leaves
+			// (--exit-with-clients). Best-effort: if registration fails we still
+			// run — the daemon just won't auto-exit on our account.
+			instanceMode := "tui"
+			if *prompt != "" {
+				instanceMode = "headless"
+			}
+			if ic, err := daemon.RegisterInstance(cfg.SocketPath, authToken, instanceMode); err == nil {
+				defer ic.Close()
+			}
+
 			session = daemon.NewSessionClient(cfg.SocketPath)
 			session.SetAuthToken(authToken)
-			if err := session.Connect(cfg.CWD, cfg.ConfigDir, cfg.Model, cfg.ForceInit, !*disableWritePermission, !*disableDirAccess, *prompt != ""); err != nil {
-				fmt.Fprintf(os.Stderr, "Error connecting to daemon: %v\n", err)
-				os.Exit(1)
+
+			// TUI mode: reopen previously-open sessions for this cwd. Sessions
+			// already live in the daemon (Attached) are owned by another vix
+			// instance — skip them, since exclusive ownership would refuse the
+			// attach anyway. The first non-attached session becomes the initial
+			// client; the rest are attached by the TUI on Init. Headless mode
+			// (prompt set) always starts fresh.
+			attached := false
+			if *prompt == "" {
+				if sums, err := client.ListSessions(cfg.CWD, cfg.ConfigDir); err == nil {
+					var claimable []protocol.SessionSummary
+					for _, sum := range sums {
+						if !sum.Attached {
+							claimable = append(claimable, sum)
+						}
+					}
+					if len(claimable) > 0 {
+						if err := session.Attach(cfg.CWD, cfg.ConfigDir, cfg.Model, cfg.ForceInit, !*disableWritePermission, !*disableDirAccess, false, claimable[0].ID); err == nil {
+							restoreSessions = claimable[1:]
+							attached = true
+							initialAttached = true
+						}
+					}
+				}
+			}
+			if !attached {
+				if err := session.Connect(cfg.CWD, cfg.ConfigDir, cfg.Model, cfg.ForceInit, !*disableWritePermission, !*disableDirAccess, *prompt != ""); err != nil {
+					fmt.Fprintf(os.Stderr, "Error connecting to daemon: %v\n", err)
+					os.Exit(1)
+				}
 			}
 			defer session.SendClose()
 		}
-	}
-
-	// Cleanup daemon subprocess on exit
-	if daemonCmd != nil {
-		defer func() {
-			daemonCmd.Process.Signal(syscall.SIGTERM)
-			done := make(chan struct{})
-			go func() {
-				daemonCmd.Wait()
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(3 * time.Second):
-				daemonCmd.Process.Kill()
-			}
-		}()
 	}
 
 	// Headless mode: send prompt and print result
@@ -325,6 +349,8 @@ func main() {
 	ui.ApplyTheme(config.LoadThemeConfig(cfg.Paths))
 
 	model := ui.NewModel(cfg, session, *testMode, authToken, !*disableWritePermission, !*disableDirAccess)
+	model.SetRestoreSessions(restoreSessions)
+	model.SetInitialAwaitingReplay(initialAttached)
 
 	p := tea.NewProgram(model)
 	ui.SetProgram(p)
@@ -335,44 +361,22 @@ func main() {
 	}
 }
 
-// promptDaemonChoice asks the user how to handle a missing daemon.
-// Returns 1 (start subprocess) or 2 (start manually later).
-func promptDaemonChoice() int {
-	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	num := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-
-	fmt.Println(warn.Render("The vix daemon is not running."))
-	fmt.Println()
-	fmt.Printf("  %s %s\n", num.Render("1)"), "Start daemon as a subprocess "+dim.Render("(will stop when this session exits, killing any other connected sessions)"))
-	fmt.Printf("  %s %s\n", num.Render("2)"), "Start the daemon manually later")
-	fmt.Println()
-	fmt.Print(prompt.Render("Choose [1/2] (default: 1): "))
-
-	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
-	line = strings.TrimSpace(line)
-	if line == "2" {
-		return 2
-	}
-	return 1
-}
-
 // findDaemon returns the path to the vixd binary.
-// It checks $PATH first, then the directory containing the current executable.
+// It prefers the vixd sitting next to the current executable so the client
+// and daemon always come from the same build; an unrelated vixd earlier on
+// $PATH (e.g. a stale install) would otherwise be spawned with flags it may
+// not understand. Falls back to $PATH only when no sibling binary exists.
 func findDaemon() (string, error) {
-	if p, err := exec.LookPath("vixd"); err == nil {
-		return p, nil
-	}
-	self, err := os.Executable()
-	if err == nil {
+	if self, err := os.Executable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(self), "vixd")
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("vixd not found in $PATH or next to the vix binary")
+	if p, err := exec.LookPath("vixd"); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("vixd not found next to the vix binary or in $PATH")
 }
 
 // startDaemon spawns the daemon process as a subprocess.
@@ -402,7 +406,22 @@ func startDaemon(apiKey, logDir, socketPath, authTokenPath string) (*exec.Cmd, e
 	if authTokenPath != "" {
 		args = append(args, "--auth-token-path", authTokenPath)
 	}
+	// A daemon spawned by vix is private to this instance, so it must not
+	// serve the mission-control web UI (which would otherwise contend for
+	// the fixed web port). Standalone `vixd` keeps serving it.
+	args = append(args, "--no-mission-control")
+	// A vix-spawned daemon is detached and long-lived (see SysProcAttr below),
+	// but it should not outlive the vix processes using it: --exit-with-clients
+	// makes it shut down shortly after the last attached vix instance leaves. A
+	// directly-launched vixd omits this and runs until signalled.
+	args = append(args, "--exit-with-clients")
 	cmd := exec.Command(daemonPath, args...)
+	// Detach the daemon from this client: start it in a new session (setsid) so
+	// it is not in the client's process group and is unaffected by terminal
+	// signals (SIGHUP on terminal close, SIGINT/SIGTERM to the foreground
+	// group). Combined with not killing it on exit, this makes the daemon a
+	// shared, long-lived process that outlives the instance that spawned it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if apiKey != "" {
 		cmd.Env = append(os.Environ(), "ANTHROPIC_API_KEY="+apiKey)
 	}
@@ -426,21 +445,6 @@ func startDaemon(apiKey, logDir, socketPath, authTokenPath string) (*exec.Cmd, e
 		}
 	}()
 	return cmd, nil
-}
-
-// promptAPIKey asks the user to enter their Anthropic API key interactively.
-func promptAPIKey() string {
-	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-
-	fmt.Println(warn.Render("No API key found."))
-	fmt.Println()
-	fmt.Print(prompt.Render("Enter your Anthropic API key: "))
-
-	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
-	key := strings.TrimSpace(line)
-	return key
 }
 
 // waitForDaemon polls until the daemon responds to ping or timeout.

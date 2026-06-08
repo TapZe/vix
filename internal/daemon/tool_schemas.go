@@ -7,8 +7,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/kirby88/vix/internal/daemon/llm"
-	"github.com/kirby88/vix/internal/telemetry"
+	"github.com/get-vix/vix/internal/daemon/llm"
+	"github.com/get-vix/vix/internal/telemetry"
 )
 
 // ToolSchemas returns the tool definitions in the provider-neutral
@@ -474,8 +474,33 @@ var readOnlyToolNames = map[string]bool{
 	"grep":               true,
 	"glob_files":         true,
 	"lsp_query":          true,
-	"web_fetch":   true,
-	"web_search":  true,
+	"web_fetch":          true,
+	"web_search":         true,
+}
+
+// SkillToolSchema returns the neutral schema for the `skill` tool, which loads
+// a named skill's full instructions (and a listing of its bundled files) on
+// demand — the second level of progressive disclosure. It is only added to a
+// session's tool list when at least one skill is loaded.
+func SkillToolSchema() llm.ToolParam {
+	return llm.ToolParam{
+		Name:        "skill",
+		Description: "Load a skill's full instructions into context on demand. Skills are reusable, task-specific instruction sets advertised by name and description in the system prompt under \"Available Skills\". Call this when the user's task matches one of them; the result is the skill's instructions plus a list of any bundled files you can then read.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "The exact name of the skill to load, as listed under \"Available Skills\".",
+				},
+				"arguments": map[string]any{
+					"type":        "string",
+					"description": "Optional arguments to substitute into the skill body ($ARGUMENTS, $1, $2, ...).",
+				},
+			},
+			"required": []string{"name"},
+		},
+	}
 }
 
 // ReadOnlyToolSchemas returns only the read-only tool schemas (for plan exploration).
@@ -498,6 +523,12 @@ func IsReadOnlyTool(name string) bool {
 // SummarizeToolInput returns a one-line human summary of tool input.
 func SummarizeToolInput(name string, input map[string]any) string {
 	switch name {
+	case "skill":
+		n, _ := input["name"].(string)
+		if args, _ := input["arguments"].(string); args != "" {
+			return n + " " + args
+		}
+		return n
 	case "read_file":
 		p, _ := input["path"].(string)
 		mode, _ := input["mode"].(string)

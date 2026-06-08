@@ -17,11 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kirby88/vix/internal/config"
-	"github.com/kirby88/vix/internal/daemon/llm"
-	"github.com/kirby88/vix/internal/daemon/mcp"
-	promptloader "github.com/kirby88/vix/internal/daemon/prompt"
-	"github.com/kirby88/vix/internal/protocol"
+	"github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/daemon/llm"
+	"github.com/get-vix/vix/internal/daemon/mcp"
+	promptloader "github.com/get-vix/vix/internal/daemon/prompt"
+	"github.com/get-vix/vix/internal/protocol"
 )
 
 // ErrMaxTokens is returned when the LLM response was truncated due to the output token limit.
@@ -41,43 +41,43 @@ type StepRef struct {
 
 // WorkflowDef is the parsed config for a workflow.
 type WorkflowDef struct {
-	Name       string                      `json:"name"`
-	EntryPoint StepRef                     `json:"entry_point"`
-	Steps      map[string]WorkflowStepDef  `json:"steps"`
-	Summary    string                      `json:"summary,omitempty"`
+	Name       string                     `json:"name"`
+	EntryPoint StepRef                    `json:"entry_point"`
+	Steps      map[string]WorkflowStepDef `json:"steps"`
+	Summary    string                     `json:"summary,omitempty"`
 }
 
 // StepOption is a structured option for tool steps using ask_question_to_user.
 type StepOption struct {
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
 	Steps        []StepRef `json:"steps,omitempty"`
-	HasUserInput bool     `json:"has_user_input,omitempty"`
+	HasUserInput bool      `json:"has_user_input,omitempty"`
 }
 
 // WorkflowStepDef defines one step in the workflow.
 type WorkflowStepDef struct {
-	Type        string              `json:"type"`                    // "agent", "tool", or "bash" (required)
-	Effort      string              `json:"effort,omitempty"`        // "adaptive", "low", "medium", "high", "max"
-	NextSteps   []StepRef           `json:"next_steps,omitempty"`    // next steps to execute (empty = end workflow)
-	InputParams map[string]InputDef `json:"input_params,omitempty"`  // declared input parameters for this step
-	Tool        string              `json:"tool,omitempty"`          // tool name for type="tool"
-	Agent       string              `json:"agent,omitempty"`         // agent name (loaded from .vix/agents/)
-	ForkFrom    string              `json:"fork_from,omitempty"`     // fork from a prior step's agent
-	Prompt      string              `json:"prompt,omitempty"`        // template, supports $() syntax
-	Command     string              `json:"command,omitempty"`       // bash command for type="bash"
-	Input       string              `json:"input,omitempty"`         // piped to stdin (supports $() expansion)
-	Output      string              `json:"output,omitempty"`        // file path to write step text output
-	DenyTools   []string            `json:"deny_tools,omitempty"`    // tools blocked from executing
-	Stream      *bool               `json:"stream,omitempty"`        // nil defaults to true
-	Silent      bool                `json:"silent,omitempty"`        // suppress all TUI events + vixd dispatch logs for this step
-	JSONOutput  bool                `json:"json_output,omitempty"`   // parse LLM output as JSON for variable expansion
-	DisplayKey  string              `json:"display_key,omitempty"`   // JSON key to extract as per-step display text
-	Explanation string              `json:"explanation,omitempty"`   // user-facing explanation shown at step start
-	Question    string              `json:"question,omitempty"`      // question text for tool steps
-	Options     []StepOption        `json:"options,omitempty"`       // structured options for ask_question_to_user
-	Category    string              `json:"category,omitempty"`      // tab/category label for ask_question_to_user
-	TimeoutSec  *int                `json:"timeout_sec,omitempty"`   // per-step timeout (type="bash" only); pointer distinguishes absent from 0
+	Type        string              `json:"type"`                   // "agent", "tool", or "bash" (required)
+	Effort      string              `json:"effort,omitempty"`       // "adaptive", "low", "medium", "high", "max"
+	NextSteps   []StepRef           `json:"next_steps,omitempty"`   // next steps to execute (empty = end workflow)
+	InputParams map[string]InputDef `json:"input_params,omitempty"` // declared input parameters for this step
+	Tool        string              `json:"tool,omitempty"`         // tool name for type="tool"
+	Agent       string              `json:"agent,omitempty"`        // agent name (loaded from .vix/agents/)
+	ForkFrom    string              `json:"fork_from,omitempty"`    // fork from a prior step's agent
+	Prompt      string              `json:"prompt,omitempty"`       // template, supports $() syntax
+	Command     string              `json:"command,omitempty"`      // bash command for type="bash"
+	Input       string              `json:"input,omitempty"`        // piped to stdin (supports $() expansion)
+	Output      string              `json:"output,omitempty"`       // file path to write step text output
+	DenyTools   []string            `json:"deny_tools,omitempty"`   // tools blocked from executing
+	Stream      *bool               `json:"stream,omitempty"`       // nil defaults to true
+	Silent      bool                `json:"silent,omitempty"`       // suppress all TUI events + vixd dispatch logs for this step
+	JSONOutput  bool                `json:"json_output,omitempty"`  // parse LLM output as JSON for variable expansion
+	DisplayKey  string              `json:"display_key,omitempty"`  // JSON key to extract as per-step display text
+	Explanation string              `json:"explanation,omitempty"`  // user-facing explanation shown at step start
+	Question    string              `json:"question,omitempty"`     // question text for tool steps
+	Options     []StepOption        `json:"options,omitempty"`      // structured options for ask_question_to_user
+	Category    string              `json:"category,omitempty"`     // tab/category label for ask_question_to_user
+	TimeoutSec  *int                `json:"timeout_sec,omitempty"`  // per-step timeout (type="bash" only); pointer distinguishes absent from 0
 }
 
 // IsStreamVisible returns whether streaming output should be shown for this step.
@@ -118,8 +118,8 @@ type AgentRunner struct {
 // WorkflowRun tracks a running workflow.
 type WorkflowRun struct {
 	Def         *WorkflowDef
-	StepAgents  map[string]*AgentRunner  // step_id -> runner used
-	StepResults map[string]*StepResult   // step_id -> result
+	StepAgents  map[string]*AgentRunner // step_id -> runner used
+	StepResults map[string]*StepResult  // step_id -> result
 }
 
 // FeatureToolOrchestrator is the feature flag name for the tool orchestrator mode.
@@ -154,6 +154,15 @@ const (
 	defaultBashStepTimeoutMax     = 600 * time.Second
 )
 
+// Package-level defaults for conversation compaction. Used as the fall-back in
+// LoadProjectConfig when the `compaction` block is absent or partially set.
+const (
+	defaultCompactionThreshold = 0.8  // fraction of context window that triggers auto-compaction
+	defaultCompactionAuto      = true // master switch for automatic compaction
+	defaultCompactionKeepLastN = -1   // -1 = use ratio; >0 = keep exactly N turns
+	defaultCompactionKeepRatio = 0.25 // trailing fraction of turns kept when KeepLastNTurns <= 0
+)
+
 // toolTimeoutsFile is the JSON shape of the `tool_timeouts` block in
 // settings.json. Fields are *int so we can distinguish "absent" from "0",
 // where "0" is explicitly invalid.
@@ -185,16 +194,40 @@ type BashStepTimeouts struct {
 	Max     time.Duration
 }
 
+// compactionFile is the JSON shape of the `compaction` block in settings.json.
+// Pointer fields distinguish "absent" (nil) from an explicit zero value.
+type compactionFile struct {
+	Threshold      *float64 `json:"threshold,omitempty"`
+	Auto           *bool    `json:"auto,omitempty"`
+	KeepLastNTurns *int     `json:"keep_last_n_turns,omitempty"`
+}
+
+// Compaction is the resolved (validated, defaulted) form of the `compaction`
+// block, stored on ProjectConfig and consumed by the auto-compaction logic and
+// the /compact command in session.go.
+type Compaction struct {
+	Threshold      float64 // (0,1]; default 0.8
+	Auto           bool    // default true
+	KeepLastNTurns int     // -1 = use ratio; >0 = keep exactly N trailing turns
+	KeepRatio      float64 // default 0.25; used when KeepLastNTurns <= 0
+}
+
 // configFile represents the top-level settings.json structure.
+//
+// Note: workflows and languages are intentionally NOT parsed here. They live
+// in their own files (config/workflow.json, config/languages.json) loaded via
+// LoadWorkflowsFile and lsp.LoadLanguageConfigs respectively. A legacy
+// settings.json may still carry "workflows"/"languages" keys, but they are
+// ignored.
 type configFile struct {
 	Version            int                   `json:"version,omitempty"`
 	Agent              string                `json:"agent,omitempty"`
 	AllowedDirectories []string              `json:"allowed_directories,omitempty"`
 	DenyList           denyListField         `json:"deny_list,omitempty"`
-	Workflows          []WorkflowDef         `json:"workflows"`
 	Features           map[string]bool       `json:"features,omitempty"`
 	ToolTimeouts       *toolTimeoutsFile     `json:"tool_timeouts,omitempty"`
 	BashStepTimeouts   *bashStepTimeoutsFile `json:"bash_step_timeouts,omitempty"`
+	Compaction         *compactionFile       `json:"compaction,omitempty"`
 	MCPServers         []mcp.ServerConfig    `json:"mcp_servers,omitempty"`
 }
 
@@ -232,10 +265,10 @@ type ProjectConfig struct {
 	AllowedDirectories []string
 	DenyPaths          []string
 	DenyURLs           []string
-	Workflows          []*WorkflowDef
 	Features           map[string]bool
 	ToolTimeouts       ToolTimeouts
 	BashStepTimeouts   BashStepTimeouts
+	Compaction         Compaction
 	MCPServers         []mcp.ServerConfig
 }
 
@@ -274,14 +307,13 @@ func LoadProjectConfig(configPaths ...string) ProjectConfig {
 			Default: defaultBashStepTimeoutDefault,
 			Max:     defaultBashStepTimeoutMax,
 		},
+		Compaction: Compaction{
+			Threshold:      defaultCompactionThreshold,
+			Auto:           defaultCompactionAuto,
+			KeepLastNTurns: defaultCompactionKeepLastN,
+			KeepRatio:      defaultCompactionKeepRatio,
+		},
 	}
-
-	// Track which config path each workflow came from for disambiguation.
-	type workflowOrigin struct {
-		wf   *WorkflowDef
-		path string
-	}
-	var allWorkflows []workflowOrigin
 
 	for _, configPath := range configPaths {
 		if configPath == "" {
@@ -426,6 +458,30 @@ func LoadProjectConfig(configPaths ...string) ProjectConfig {
 			}
 			result.BashStepTimeouts = next
 		}
+		if cfg.Compaction != nil {
+			// Mirrors the timeout merges above: partial blocks honour whichever
+			// knob they set, absent blocks preserve an earlier file's value, and
+			// invalid values are ignored with a log line.
+			next := result.Compaction
+			if cfg.Compaction.Threshold != nil {
+				if t := *cfg.Compaction.Threshold; t > 0 && t <= 1 {
+					next.Threshold = t
+				} else {
+					log.Printf("[config] %s: compaction.threshold must be in (0,1], ignoring", configPath)
+				}
+			}
+			if cfg.Compaction.Auto != nil {
+				next.Auto = *cfg.Compaction.Auto
+			}
+			if cfg.Compaction.KeepLastNTurns != nil {
+				n := *cfg.Compaction.KeepLastNTurns
+				if n < -1 {
+					n = -1
+				}
+				next.KeepLastNTurns = n
+			}
+			result.Compaction = next
+		}
 		// Merge MCP servers: later layer overrides by name, new names are appended.
 		for _, srv := range cfg.MCPServers {
 			if srv.Name == "" {
@@ -444,35 +500,10 @@ func LoadProjectConfig(configPaths ...string) ProjectConfig {
 				result.MCPServers = append(result.MCPServers, srv)
 			}
 		}
-
-		for i := range cfg.Workflows {
-			pf := cfg.Workflows[i]
-			if err := validateWorkflow(&pf); err != nil {
-				LogError("[workflow] invalid workflow '%s': %v", pf.Name, err)
-				continue
-			}
-			allWorkflows = append(allWorkflows, workflowOrigin{wf: &pf, path: configPath})
-		}
-	}
-
-	// Disambiguate duplicate workflow names by appending the origin.
-	nameCount := make(map[string]int)
-	for _, wo := range allWorkflows {
-		nameCount[wo.wf.Name]++
-	}
-	for i := range allWorkflows {
-		if nameCount[allWorkflows[i].wf.Name] > 1 {
-			allWorkflows[i].wf.Name += " (" + configOriginLabel(allWorkflows[i].path) + ")"
-		}
-	}
-
-	for _, wo := range allWorkflows {
-		result.Workflows = append(result.Workflows, wo.wf)
 	}
 
 	return result
 }
-
 
 // PersistAllowedDirectory appends directories to the allowed_directories list
 // in a settings.json file. Uses map[string]any for round-trip safety so that
@@ -539,26 +570,53 @@ func PersistAllowedDirectory(configPath string, dirs []string) error {
 	return os.Rename(tmp.Name(), configPath)
 }
 
-// configOriginLabel returns a short label for a config path.
-// ~/.vix/settings.json becomes "~/.vix/settings.json".
-// /some/path/myproject/.vix/settings.json becomes "myproject/.vix/settings.json".
-func configOriginLabel(configPath string) string {
-	homeDir, _ := os.UserHomeDir()
-	if homeDir != "" && strings.HasPrefix(configPath, homeDir+string(filepath.Separator)) {
-		return "~" + configPath[len(homeDir):]
-	}
-	// Use parent-of-.vix as project name: .../project/.vix/settings.json → project/.vix/settings.json
-	dir := filepath.Dir(configPath)                // .../project/.vix
-	vixDir := filepath.Base(dir)                   // .vix
-	projectDir := filepath.Base(filepath.Dir(dir)) // project
-	return projectDir + "/" + vixDir + "/" + filepath.Base(configPath)
+// workflowsFile is the JSON shape of config/workflow.json: {"workflows": [...]}.
+type workflowsFile struct {
+	Workflows []WorkflowDef `json:"workflows"`
 }
 
-// LoadWorkflows reads settings.json and returns the workflow list.
-// Deprecated: Use LoadProjectConfig instead.
-func LoadWorkflows(configPath string) []*WorkflowDef {
-	cfg := LoadProjectConfig(configPath)
-	return cfg.Workflows
+// LoadWorkflowsFile reads a config/workflow.json file and returns its
+// validated workflow list, preserving file order. Returns nil on a missing
+// file or parse error; individually invalid workflows are skipped with a log
+// line. Duplicate names within the file are disambiguated by appending an
+// index so the UI can tell them apart.
+func LoadWorkflowsFile(path string) []*WorkflowDef {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var cfg workflowsFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		LogError("[workflow] failed to parse %s: %v", path, err)
+		return nil
+	}
+
+	out := make([]*WorkflowDef, 0, len(cfg.Workflows))
+	for i := range cfg.Workflows {
+		wf := cfg.Workflows[i]
+		if err := validateWorkflow(&wf); err != nil {
+			LogError("[workflow] invalid workflow '%s': %v", wf.Name, err)
+			continue
+		}
+		out = append(out, &wf)
+	}
+
+	// Disambiguate duplicate names within the single file.
+	nameCount := make(map[string]int)
+	for _, wf := range out {
+		nameCount[wf.Name]++
+	}
+	seen := make(map[string]int)
+	for _, wf := range out {
+		if nameCount[wf.Name] > 1 {
+			seen[wf.Name]++
+			wf.Name = fmt.Sprintf("%s (%d)", wf.Name, seen[wf.Name])
+		}
+	}
+	return out
 }
 
 // validateWorkflow checks that a workflow definition is consistent.
@@ -694,7 +752,7 @@ func envVars(cwd, model string) map[string]string {
 // prompt includes from, in precedence order (highest first).
 // toolTimeouts carries the parent session's tool_timeouts bounds so the
 // runner's tool dispatches honour the same settings.json floor/cap.
-func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, cwd string, toolTimeouts ToolTimeouts, searchDirs ...string) *AgentRunner {
+func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, cwd string, toolTimeouts ToolTimeouts, searchDirs ...string) (*AgentRunner, error) {
 	model := config.Model
 	if model == "" {
 		model = parentModel
@@ -711,8 +769,7 @@ func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, 
 	}
 	client, err := llm.NewFromModel(model, PluginConfig{}, effort, int64(config.MaxTokens))
 	if err != nil {
-		// Fall back to Anthropic adapter with the caller-provided credential.
-		client = NewLLM(cred, model, effort, int64(config.MaxTokens), PluginConfig{})
+		return nil, fmt.Errorf("cannot build agent runner: %w", err)
 	}
 	tools := FilterToolSchemasWithBounds(config.Tools, toolTimeouts.Default, toolTimeouts.Max)
 
@@ -731,11 +788,11 @@ func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, 
 		Tools:        tools,
 		MaxTurns:     maxTurns,
 		ToolTimeouts: toolTimeouts,
-	}
+	}, nil
 }
 
 // Clone creates a deep copy of the agent runner (for fork_from).
-func (a *AgentRunner) Clone(cred config.Credential) *AgentRunner {
+func (a *AgentRunner) Clone(cred config.Credential) (*AgentRunner, error) {
 	msgs := make([]llm.MessageParam, len(a.Messages))
 	copy(msgs, a.Messages)
 
@@ -748,7 +805,7 @@ func (a *AgentRunner) Clone(cred config.Credential) *AgentRunner {
 	cloneSpec := llm.Spec(a.LLM) // e.g. "openai/gpt-5.1"
 	clonedClient, err := llm.NewFromModel(cloneSpec, PluginConfig{}, a.LLM.Effort(), a.LLM.MaxTokens())
 	if err != nil {
-		clonedClient = NewLLM(cred, a.LLM.Model(), a.LLM.Effort(), a.LLM.MaxTokens(), PluginConfig{})
+		return nil, fmt.Errorf("cannot clone agent runner: %w", err)
 	}
 
 	return &AgentRunner{
@@ -759,7 +816,7 @@ func (a *AgentRunner) Clone(cred config.Credential) *AgentRunner {
 		Tools:        tools,
 		MaxTurns:     a.MaxTurns,
 		ToolTimeouts: a.ToolTimeouts,
-	}
+	}, nil
 }
 
 // Send sends a message to the agent, runs the LLM loop with tool dispatch,
@@ -1387,7 +1444,12 @@ func (s *Session) executeParallelSteps(
 					if step.Effort != "" {
 						config.Effort = step.Effort
 					}
-					agent = NewAgentRunner(config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+					ar, err := NewAgentRunner(config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+					if err != nil {
+						errs[idx] = fmt.Errorf("step '%s': %w", stepID, err)
+						return
+					}
+					agent = ar
 					if s.headless {
 						agent.Tools = ExcludeTools(agent.Tools, "ask_question_to_user")
 					}
@@ -1399,7 +1461,12 @@ func (s *Session) executeParallelSteps(
 						errs[idx] = fmt.Errorf("step '%s': fork_from '%s' has no agent instance", stepID, step.ForkFrom)
 						return
 					}
-					agent = source.Clone(cred)
+					ar, err := source.Clone(cred)
+					if err != nil {
+						errs[idx] = fmt.Errorf("step '%s': %w", stepID, err)
+						return
+					}
+					agent = ar
 				}
 
 				vars := envVars(s.cwd, s.model)
@@ -1913,7 +1980,17 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 				if step.Effort != "" {
 					config.Effort = step.Effort
 				}
-				agent = NewAgentRunner(config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+				ar, err := NewAgentRunner(config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+				if err != nil {
+					s.activePlan = nil
+					s.emit("event.workflow_complete", protocol.EventWorkflowComplete{
+						WorkflowName: pf.Name,
+						Success:      false,
+						DurationMs:   time.Since(workflowStart).Milliseconds(),
+					})
+					return fmt.Errorf("step '%s': %w", stepID, err)
+				}
+				agent = ar
 				if s.headless {
 					agent.Tools = ExcludeTools(agent.Tools, "ask_question_to_user")
 				}
@@ -1929,7 +2006,17 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 					})
 					return fmt.Errorf("step '%s': fork_from '%s' has no agent instance", stepID, step.ForkFrom)
 				}
-				agent = source.Clone(cred)
+				ar, err := source.Clone(cred)
+				if err != nil {
+					s.activePlan = nil
+					s.emit("event.workflow_complete", protocol.EventWorkflowComplete{
+						WorkflowName: pf.Name,
+						Success:      false,
+						DurationMs:   time.Since(workflowStart).Milliseconds(),
+					})
+					return fmt.Errorf("step '%s': %w", stepID, err)
+				}
+				agent = ar
 				agentLabel = stepID + " (from " + step.ForkFrom + ")"
 			}
 			_ = agentLabel

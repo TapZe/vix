@@ -61,12 +61,55 @@ func (p VixPaths) Layers() []string {
 	return out
 }
 
+// ConfigDir returns the directory holding the split config files
+// (workflow.json, languages.json). Override mode: override/config. Normal
+// mode: home/config (home-only by design — these files are not layered with
+// the project directory). Empty when home is unavailable in normal mode.
+func (p VixPaths) ConfigDir() string {
+	if p.override != "" {
+		return filepath.Join(p.override, "config")
+	}
+	if p.home == "" {
+		return ""
+	}
+	return filepath.Join(p.home, "config")
+}
+
+// WorkflowsFile returns the path to workflow.json, or "" if unavailable.
+func (p VixPaths) WorkflowsFile() string {
+	dir := p.ConfigDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "workflow.json")
+}
+
+// LanguagesFile returns the path to languages.json, or "" if unavailable.
+func (p VixPaths) LanguagesFile() string {
+	dir := p.ConfigDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "languages.json")
+}
+
 // Settings returns the settings.json paths to merge, in load order.
 func (p VixPaths) Settings() []string {
 	layers := p.Layers()
 	out := make([]string, len(layers))
 	for i, d := range layers {
 		out[i] = filepath.Join(d, "settings.json")
+	}
+	return out
+}
+
+// Providers returns the providers.json paths to merge, in load order (later
+// overrides earlier). These overlay the binary's embedded providers.json.
+func (p VixPaths) Providers() []string {
+	layers := p.Layers()
+	out := make([]string, len(layers))
+	for i, d := range layers {
+		out[i] = filepath.Join(d, "providers.json")
 	}
 	return out
 }
@@ -118,6 +161,41 @@ func (p VixPaths) Logs() string {
 		return ""
 	}
 	return filepath.Join(p.home, "logs")
+}
+
+// Sessions returns the directory where persisted session records live.
+// Sessions are stored globally (not project-scoped): override mode uses
+// override/sessions; normal mode uses home/sessions (empty if home is
+// unavailable). Each record carries its own cwd so the daemon can filter the
+// open list by the launching project.
+func (p VixPaths) Sessions() string {
+	if p.override != "" {
+		return filepath.Join(p.override, "sessions")
+	}
+	if p.home == "" {
+		return ""
+	}
+	return filepath.Join(p.home, "sessions")
+}
+
+// SessionsOpen returns the subdirectory holding open (TUI-visible) sessions.
+// Empty when Sessions() is empty.
+func (p VixPaths) SessionsOpen() string {
+	base := p.Sessions()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "open")
+}
+
+// SessionsClosed returns the subdirectory holding closed sessions (retained on
+// disk but not reopened on launch). Empty when Sessions() is empty.
+func (p VixPaths) SessionsClosed() string {
+	base := p.Sessions()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "closed")
 }
 
 // AccessStatsDB returns the sqlite path for per-session tool access stats.

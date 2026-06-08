@@ -7,16 +7,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/daemon"
+	"github.com/get-vix/vix/internal/daemon/brain"
+	"github.com/get-vix/vix/internal/providers"
+	"github.com/get-vix/vix/internal/telemetry"
 	"github.com/google/uuid"
-	"github.com/kirby88/vix/internal/config"
-	"github.com/kirby88/vix/internal/daemon"
-	"github.com/kirby88/vix/internal/daemon/brain"
-	"github.com/kirby88/vix/internal/telemetry"
 )
 
 var Version = "dev"
@@ -38,7 +40,9 @@ func main() {
 	socketPathFlag := flag.String("socket-path", "", "Unix socket path for the vix↔vixd connection. Env: VIX_SOCKET_PATH. Default: "+defaultSocketPath+".")
 	authTokenPath := flag.String("auth-token-path", "", "Path to a file holding the shared-secret token required on every incoming socket message. Empty means no auth check (in-process tests / trusted-host runs only — production deployments must set this and put the file outside the agent's reachable path tree, e.g. on a Landlock-blocked location). Env: VIX_AUTH_TOKEN_PATH.")
 	webPort := flag.Int("web-port", 1337, "Port for the local web UI. 0 disables it. Env: VIX_WEB_PORT.")
+	noMissionControl := flag.Bool("no-mission-control", false, "Disable the mission-control web UI server. Env: VIX_NO_MISSION_CONTROL.")
 	pprofPort := flag.Int("pprof-port", 0, "Port for the pprof HTTP server (GET /debug/pprof/*). 0 disables it. Env: VIX_PPROF_PORT.")
+	exitWithClients := flag.Bool("exit-with-clients", false, "Shut down automatically once the last attached vix instance disconnects (after a short grace period). Off by default so a directly-launched vixd runs until signalled. vix sets this when it spawns a daemon. Env: VIX_EXIT_WITH_CLIENTS.")
 	flag.Parse()
 
 	// Env-var fallbacks for path-bearing flags. Precedence: explicit
@@ -64,9 +68,19 @@ func main() {
 			*webPort = p
 		}
 	}
+	if !*noMissionControl {
+		if v := os.Getenv("VIX_NO_MISSION_CONTROL"); v == "1" || v == "true" {
+			*noMissionControl = true
+		}
+	}
 	if v := os.Getenv("VIX_PPROF_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			*pprofPort = p
+		}
+	}
+	if !*exitWithClients {
+		if v := os.Getenv("VIX_EXIT_WITH_CLIENTS"); v == "1" || v == "true" {
+			*exitWithClients = true
 		}
 	}
 
@@ -84,7 +98,7 @@ func main() {
 	log.SetPrefix("[vixd] ")
 	defer log.Printf("vixd exiting")
 	daemon.ProtectDaemon()
-	cred := config.ResolveProviderCredential("anthropic", true)
+	cred := config.ResolveProviderCredential("anthropic")
 	if cred.Value != "" {
 		log.Printf("API key loaded (source: %s)", cred.Source)
 	} else {
@@ -127,20 +141,39 @@ func main() {
 	}
 	telemetry.Init(telemetry.Config{Version: Version, Mode: "daemon", Enabled: config.TelemetryEnabled()})
 	defer telemetry.Shutdown()
+	// Top-level crash handler: capture the panic as a PostHog exception and
+	// flush synchronously (Shutdown is bounded by ShutdownTimeout) before the
+	// process dies, then re-panic to preserve Go's crash output and exit code.
+	// Registered after the Shutdown defer so it runs first on unwind; the
+	// later Shutdown is a no-op (closeOnce). Only catches main-goroutine panics.
+	defer func() {
+		if r := recover(); r != nil {
+			telemetry.TrackPanic("vixd.main", r, debug.Stack())
+			telemetry.Shutdown()
+			panic(r)
+		}
+	}()
 
 	sessionID := uuid.New().String()
 
 	cwd, _ := os.Getwd()
 	pluginPaths := config.NewVixPaths("", config.HomeVixDir(), cwd)
+	// Load the data-driven provider/model registry: embedded defaults overlaid
+	// by ~/.vix and ./.vix providers.json. On error, log and fall back to the
+	// embedded defaults (providers.Default() lazy-loads them).
+	if err := providers.Configure(pluginPaths.Providers()); err != nil {
+		log.Printf("[providers] using embedded defaults: %v", err)
+	}
 	pluginCfg := daemon.LoadPlugins(pluginPaths.Plugins(), Version, model)
 
 	server := daemon.NewServer(*socketPathFlag, cred, sessionID, model, daemonConfig, pluginCfg)
+	server.SetExitWithClients(*exitWithClients)
 	daemon.RegisterBuiltinHandlers(server)
 	brain.RegisterBrainHandlers(func(cmd string, handler func(map[string]any) (map[string]any, error)) {
 		server.RegisterHandler(cmd, handler)
 	}, cred, ctx)
 	daemon.RegisterToolHandlers(server)
-	if *webPort > 0 {
+	if *webPort > 0 && !*noMissionControl {
 		go daemon.StartWebServer(ctx, server, *webPort)
 	}
 	if *pprofPort > 0 {

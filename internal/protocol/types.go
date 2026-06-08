@@ -30,20 +30,54 @@ type SessionEvent struct {
 
 // --- Client → Daemon command payloads ---
 
+// InstanceRegisterData is the payload of an "instance.register" command. A vix
+// process opens one such connection at startup and holds it open for its whole
+// lifetime so the daemon can count attached instances independently of sessions
+// (a single vix instance may hold several session connections, or none). The
+// connection closing — on clean exit or process death — is the liveness signal;
+// no heartbeat is sent. The fields are advisory (logging/observability only);
+// counting relies on the connection itself.
+type InstanceRegisterData struct {
+	InstanceID string `json:"instance_id,omitempty"`
+	Mode       string `json:"mode,omitempty"` // "tui" | "headless"
+}
+
 // SessionStartData is sent to start a new agent session.
 type SessionStartData struct {
-	CWD                             string `json:"cwd"`
-	ConfigDir                       string `json:"config_dir,omitempty"`
-	Model                           string `json:"model"`
-	ForceInit                       bool   `json:"force_init"`
-	EnableAutomaticWritePermission bool `json:"enable_automatic_write_permission"`
-	EnableAutomaticDirectoryAccess bool `json:"enable_automatic_directory_access"`
-	Headless                        bool   `json:"headless"`
+	CWD                            string `json:"cwd"`
+	ConfigDir                      string `json:"config_dir,omitempty"`
+	Model                          string `json:"model"`
+	ForceInit                      bool   `json:"force_init"`
+	EnableAutomaticWritePermission bool   `json:"enable_automatic_write_permission"`
+	EnableAutomaticDirectoryAccess bool   `json:"enable_automatic_directory_access"`
+	Headless                       bool   `json:"headless"`
 	// Fork fields: when ForkSessionID is non-empty the new session is seeded
 	// with the conversation history of the named session up to and including
 	// the turn at ForkTurnIdx (0-based).
 	ForkSessionID string `json:"fork_session_id,omitempty"`
 	ForkTurnIdx   int    `json:"fork_turn_idx,omitempty"`
+	// AttachSessionID, when non-empty, asks the daemon to resume a persisted
+	// session by ID instead of creating a fresh one: it loads the on-disk
+	// record (open/ or closed/), reuses that ID, and replays the conversation
+	// to the client via event.replay. If no record exists the daemon answers
+	// with event.error carrying Code "session_not_found".
+	AttachSessionID string `json:"attach_session_id,omitempty"`
+}
+
+// SessionSummary is the lightweight projection of a persisted session returned
+// by the session.list RPC. It carries just enough to populate the Sessions
+// list without loading full conversation histories.
+type SessionSummary struct {
+	ID            string `json:"id"`
+	CWD           string `json:"cwd"`
+	Model         string `json:"model"`
+	FirstMessage  string `json:"first_message,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`      // RFC3339
+	LastRequestAt string `json:"last_request_at,omitempty"` // RFC3339
+	// Attached is true when this session is currently live in the daemon (open
+	// in some connection). The launching client uses it to avoid attaching a
+	// session another instance already owns (exclusive single-writer ownership).
+	Attached bool `json:"attached,omitempty"`
 }
 
 // SessionInputData carries user chat input.
@@ -149,6 +183,16 @@ type EventStreamDone struct {
 	ElapsedMs           int64 `json:"elapsed_ms"`
 }
 
+// EventCompacted signals that the conversation history was summarized to free
+// context. FromTokens is the prompt size before compaction; ToTokens is 0 when
+// the post-compaction size is not yet known (recomputed on the next turn).
+type EventCompacted struct {
+	FromTokens      int64 `json:"from_tokens"`
+	ToTokens        int64 `json:"to_tokens"`
+	SummarizedTurns int   `json:"summarized_turns"`
+	Auto            bool  `json:"auto"` // true = auto-trigger, false = /compact
+}
+
 // EventToolCall indicates a tool call is starting.
 type EventToolCall struct {
 	ToolID string `json:"tool_id"`
@@ -167,9 +211,9 @@ type EventToolCall struct {
 	// `timeout` override.
 	TimeoutSec int `json:"timeout_sec,omitempty"`
 	// Bash-specific alternative-tool justifications (omitted when empty or "N/A").
-	ReasonNotReadFile       string `json:"reason_not_read_file,omitempty"`
-	ReasonNotEditFile       string `json:"reason_not_edit_file,omitempty"`
-	ReasonNotGlobFiles      string `json:"reason_not_glob_files,omitempty"`
+	ReasonNotReadFile  string `json:"reason_not_read_file,omitempty"`
+	ReasonNotEditFile  string `json:"reason_not_edit_file,omitempty"`
+	ReasonNotGlobFiles string `json:"reason_not_glob_files,omitempty"`
 	// ReasonToIncreaseTimeout is the model's justification for raising the
 	// bash/glob_files timeout above the 120s default. Populated from the
 	// `reason_to_increase_timeout` field of the tool input.
@@ -249,6 +293,50 @@ type EventUserQuestion struct {
 // EventError carries an error message.
 type EventError struct {
 	Message string `json:"message"`
+	// Code is an optional machine-readable discriminator. Used by the attach
+	// flow: "session_not_found" tells the client a resume target no longer
+	// exists on disk so it can orphan the session (offer /copy) instead of
+	// retrying the reconnect forever; "session_busy" tells the client the
+	// session is already open in another connection (exclusive single-writer
+	// ownership) so it should retry later or attach a different session.
+	Code string `json:"code,omitempty"`
+}
+
+// --- Session restore / replay (attach) ---
+
+// ReplayBlock is one content block of a replayed conversation turn, projected
+// into a wire-stable shape owned by this package (so neither protocol nor the
+// TUI needs to import the daemon's llm types).
+type ReplayBlock struct {
+	Kind     string         `json:"kind"` // "text" | "thinking" | "tool_use" | "tool_result"
+	Text     string         `json:"text,omitempty"`
+	ToolID   string         `json:"tool_id,omitempty"`
+	ToolName string         `json:"tool_name,omitempty"`
+	Input    map[string]any `json:"input,omitempty"`
+	Output   string         `json:"output,omitempty"`
+	IsError  bool           `json:"is_error,omitempty"`
+}
+
+// ReplayMessage is one turn of a replayed conversation.
+type ReplayMessage struct {
+	Role   string        `json:"role"` // "user" | "assistant"
+	Blocks []ReplayBlock `json:"blocks"`
+}
+
+// EventReplay is emitted once, immediately after event.session_started, when a
+// client attaches to a persisted session. It rebuilds the chat viewport and
+// restores the session's mode/model/todos, plus any restore-time warnings
+// (model changed, workflow missing, etc.).
+type EventReplay struct {
+	Messages       []ReplayMessage `json:"messages"`
+	Todos          []TodoItem      `json:"todos,omitempty"`
+	ActivePlan     *Plan           `json:"active_plan,omitempty"`
+	Model          string          `json:"model,omitempty"`
+	SessionMode    string          `json:"session_mode,omitempty"`
+	ActiveWorkflow string          `json:"active_workflow,omitempty"`
+	// Warnings are human-readable restore notices rendered into the viewport
+	// (e.g. "Saved with model X; switched to your current default Y.").
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // EventRetry notifies the UI about an API retry attempt.
@@ -277,6 +365,18 @@ type WorkflowInfo struct {
 // EventWorkflowsAvailable carries the list of configured workflows to the UI.
 type EventWorkflowsAvailable struct {
 	Workflows []WorkflowInfo `json:"workflows"`
+}
+
+// SkillInfo describes a loaded skill available for slash-command autocomplete.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// EventSkillsAvailable carries the list of loaded skills to the UI so they can
+// be offered as slash commands.
+type EventSkillsAvailable struct {
+	Skills []SkillInfo `json:"skills"`
 }
 
 // --- Workflow events ---
@@ -318,7 +418,7 @@ type EventWorkflowStepDone struct {
 	Success             bool       `json:"success"`
 	TimedOut            bool       `json:"timed_out,omitempty"` // bash step killed by per-step timeout; workflow continues
 	Display             string     `json:"display,omitempty"`
-	Command             string     `json:"command,omitempty"`  // bash step: resolved command that was run
+	Command             string     `json:"command,omitempty"`     // bash step: resolved command that was run
 	BashOutput          string     `json:"bash_output,omitempty"` // bash step: first 5 lines of output
 	Model               string     `json:"model,omitempty"`
 	InputTokens         int64      `json:"input_tokens,omitempty"`

@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -138,6 +139,71 @@ Deploy!
 	}
 	if s := reg.Get("deploy"); s.Source != "project" {
 		t.Errorf("expected project to take precedence, got source=%q", s.Source)
+	}
+}
+
+func TestSkillDirAndBundledFiles(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "project", "pdf")
+	os.MkdirAll(filepath.Join(skillDir, "scripts"), 0755)
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: pdf
+description: Work with PDFs
+---
+Body. Files live in ${SKILL_DIR}.
+`), 0644)
+	os.WriteFile(filepath.Join(skillDir, "reference.md"), []byte("ref"), 0644)
+	os.WriteFile(filepath.Join(skillDir, "scripts", "extract.py"), []byte("print()"), 0644)
+
+	reg := LoadSkills(filepath.Join(dir, "project"))
+	sk := reg.Get("pdf")
+	if sk == nil {
+		t.Fatal("missing skill: pdf")
+	}
+	if sk.Dir != skillDir {
+		t.Errorf("Dir = %q, want %q", sk.Dir, skillDir)
+	}
+
+	files := sk.BundledFiles()
+	want := []string{"reference.md", filepath.Join("scripts", "extract.py")}
+	if len(files) != len(want) {
+		t.Fatalf("BundledFiles = %v, want %v", files, want)
+	}
+	for i := range want {
+		if files[i] != want[i] {
+			t.Errorf("BundledFiles[%d] = %q, want %q", i, files[i], want[i])
+		}
+	}
+
+	// ${SKILL_DIR} is substituted with the skill directory.
+	if got := sk.RenderPrompt(""); !strings.Contains(got, skillDir) {
+		t.Errorf("RenderPrompt did not substitute ${SKILL_DIR}: %q", got)
+	}
+
+	// LoadForTool includes the body plus absolute paths to bundled files.
+	out := sk.LoadForTool("")
+	if !strings.Contains(out, "Bundled files") {
+		t.Errorf("LoadForTool missing bundled-files section: %q", out)
+	}
+	if !strings.Contains(out, filepath.Join(skillDir, "reference.md")) {
+		t.Errorf("LoadForTool missing absolute bundled path: %q", out)
+	}
+}
+
+func TestLoadForToolNoBundledFiles(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "project", "plain")
+	os.MkdirAll(skillDir, 0755)
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: plain
+description: No extras
+---
+Just instructions.
+`), 0644)
+
+	sk := LoadSkills(filepath.Join(dir, "project")).Get("plain")
+	if out := sk.LoadForTool(""); strings.Contains(out, "Bundled files") {
+		t.Errorf("expected no bundled-files section, got: %q", out)
 	}
 }
 

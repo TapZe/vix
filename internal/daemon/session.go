@@ -11,52 +11,63 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/kirby88/vix/internal/agent"
-	"github.com/kirby88/vix/internal/config"
-	"github.com/kirby88/vix/internal/daemon/llm"
-	"github.com/kirby88/vix/internal/daemon/mcp"
-	"github.com/kirby88/vix/internal/daemon/prompt"
-	"github.com/kirby88/vix/internal/protocol"
+	"github.com/get-vix/vix/internal/agent"
+	"github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/daemon/llm"
+	"github.com/get-vix/vix/internal/daemon/mcp"
+	"github.com/get-vix/vix/internal/daemon/prompt"
+	"github.com/get-vix/vix/internal/protocol"
+	"github.com/get-vix/vix/internal/providers"
+	"github.com/get-vix/vix/internal/telemetry"
 )
 
 // Session manages a single agent session over a persistent socket connection.
 type Session struct {
-	id          string
-	parentID    string // non-empty if this session was forked; set once at creation
-	forkTurnIdx int    // which turn it was forked at (0-based); meaningful only when parentID != ""
-	server      *Server
-	llm         LLM
-	model       string
-	cwd                             string
-	paths                           config.VixPaths
-	forceInit                       bool
+	id                             string
+	parentID                       string // non-empty if this session was forked; set once at creation
+	forkTurnIdx                    int    // which turn it was forked at (0-based); meaningful only when parentID != ""
+	server                         *Server
+	llm                            LLM
+	model                          string
+	cwd                            string
+	paths                          config.VixPaths
+	forceInit                      bool
 	enableAutomaticWritePermission bool
 	enableAutomaticDirectoryAccess bool
-	headless                        bool
-	eventChan                       chan protocol.SessionEvent
-	commandChan                     chan protocol.SessionCommand
-	ctx                             context.Context
-	cancel                          context.CancelFunc
+	headless                       bool
+	eventChan                      chan protocol.SessionEvent
+	commandChan                    chan protocol.SessionCommand
+	ctx                            context.Context
+	cancel                         context.CancelFunc
 
 	// Agent state
-	messages        []llm.MessageParam
-	tools           []llm.ToolParam
+	messages []llm.MessageParam
+	tools    []llm.ToolParam
 
 	// Fork snapshots: a copy of messages after each completed normal turn,
 	// protected by mu. Used by snapshotMessagesForFork to seed forked sessions.
 	mu            sync.Mutex
 	turnSnapshots [][]llm.MessageParam
+	// lastInputTokens is the true prompt size (input + cache read + cache
+	// creation) of the most recent turn. Drives auto-compaction. Protected
+	// by mu; reset to 0 after a compaction so it doesn't immediately retrigger.
+	lastInputTokens int64
 	activePlan      *protocol.Plan
 	backgroundTasks BackgroundTaskRegistry
 	bashJobs        BashJobRegistry
 	customAgents    map[string]SubagentConfig
 
-	// Workflows loaded from config
-	workflows []*WorkflowDef
+	// Workflows loaded from config/workflow.json. Guarded by workflowsMu
+	// because the daemon's config watcher can swap the slice from a separate
+	// goroutine (hot reload) while the session loop reads it.
+	workflowsMu sync.RWMutex
+	workflows   []*WorkflowDef
 
 	// Skills registry
 	skills *agent.SkillRegistry
@@ -104,6 +115,12 @@ type Session struct {
 	// Active LLM call cancellation
 	cancelStream context.CancelFunc
 
+	// configErr is non-nil when the session has no usable LLM client (e.g. no
+	// credential for the selected model's provider). While set, s.llm is nil
+	// and the session refuses to stream; the error surfaces to the UI on the
+	// next input attempt.
+	configErr error
+
 	// Active plan/workflow cancellation
 	planCancel context.CancelFunc
 
@@ -121,31 +138,41 @@ type Session struct {
 	totalCacheWrite   int64
 	totalAPIWaitMs    int64
 	sessionMode       string // "chat" or "workflow"
+	activeWorkflow    string // name of the active workflow when sessionMode=="workflow"
+
+	// Persistence/attach state.
+	// attachRecord is non-nil when this session is resuming a persisted record;
+	// Run() emits event.replay (with restore validation) after initBrain.
+	attachRecord *sessionRecord
+	// closedByUser is set when a session.close command is received (the TUI "x"
+	// action), distinguishing an explicit close (move record open->closed) from
+	// a bare disconnect (record stays open for next-run reopen).
+	closedByUser bool
 }
 
 // NewSession creates a new agent session.
 func NewSession(id string, server *Server, llmClient LLM, model, cwd, configDir string, forceInit bool, enableAutomaticWritePermission bool, enableAutomaticDirectoryAccess bool, headless bool, parentCtx context.Context) *Session {
 	ctx, cancel := context.WithCancel(parentCtx)
 	return &Session{
-		id:                              id,
-		server:                          server,
-		llm:                             llmClient,
-		model:                           model,
-		cwd:                             cwd,
-		paths:                           config.NewVixPaths(configDir, server.homeVixDir, cwd),
-		forceInit:                       forceInit,
+		id:                             id,
+		server:                         server,
+		llm:                            llmClient,
+		model:                          model,
+		cwd:                            cwd,
+		paths:                          config.NewVixPaths(configDir, server.homeVixDir, cwd),
+		forceInit:                      forceInit,
 		enableAutomaticWritePermission: enableAutomaticWritePermission,
 		enableAutomaticDirectoryAccess: enableAutomaticDirectoryAccess,
-		headless:                        headless,
-		eventChan:                       make(chan protocol.SessionEvent, 256),
-		commandChan:                     make(chan protocol.SessionCommand, 16),
-		workflowMsgChan:                 make(chan string, 1),
-		ctx:                             ctx,
-		cancel:                          cancel,
-		tools:                           ToolSchemas(),
-		todoList:                        make([]protocol.TodoItem, 0),
-		startTime:                       time.Now(),
-		sessionMode:                     "chat",
+		headless:                       headless,
+		eventChan:                      make(chan protocol.SessionEvent, 256),
+		commandChan:                    make(chan protocol.SessionCommand, 16),
+		workflowMsgChan:                make(chan string, 1),
+		ctx:                            ctx,
+		cancel:                         cancel,
+		tools:                          ToolSchemas(),
+		todoList:                       make([]protocol.TodoItem, 0),
+		startTime:                      time.Now(),
+		sessionMode:                    "chat",
 	}
 }
 
@@ -502,7 +529,9 @@ func (s *Session) waitForCommand(ctx context.Context, types ...string) (protocol
 func (s *Session) Run() {
 	defer func() {
 		if r := recover(); r != nil {
-			LogError("Session %s panic: %v\n%s", s.id, r, debug.Stack())
+			stack := debug.Stack()
+			LogError("Session %s panic: %v\n%s", s.id, r, stack)
+			telemetry.TrackPanic("session.Run", r, stack)
 			s.emit("event.error", protocol.EventError{Message: fmt.Sprintf("session panic: %v", r)})
 		}
 		s.cancel()
@@ -513,6 +542,10 @@ func (s *Session) Run() {
 	}()
 
 	s.initBrain()
+
+	// Attached (resumed) session: rebuild the client's viewport and apply
+	// restore-time validation now that the model and workflows are resolved.
+	s.emitReplay()
 
 	for {
 		select {
@@ -536,21 +569,19 @@ func (s *Session) Run() {
 				if data.Model != "" {
 					// Every model spec must carry an explicit provider
 					// prefix (anthropic/, openai/, openrouter/, minimax/,
-					// mimo/).
-					// The UI picker dispatches the Spec field, which is
-					// already prefixed; bare names will fail in
+					// mimo/). The UI picker dispatches the Spec field, which
+					// is already prefixed; bare names will fail in
 					// llm.NewFromModel with a clear error.
 					spec := data.Model
-					client, err := llm.NewFromModel(spec, s.server.pluginConfig, llm.DefaultEffortFromSpec(spec), 0)
-					if err != nil {
+					// applyModel commits only on success, so a failed switch
+					// leaves a previously-working session untouched.
+					if err := s.applyModel(spec, 0); err != nil {
 						s.emit("event.error", protocol.EventError{Message: fmt.Sprintf("Cannot switch to model %q: %v", spec, err)})
 						log.Printf("[session] set_model failed for %s: %v", spec, err)
 						continue
 					}
-					s.llm = client
-					s.model = spec
 
-					log.Printf("[session] model switched to %s (provider=%s)", spec, client.Provider())
+					log.Printf("[session] model switched to %s (provider=%s)", spec, s.llm.Provider())
 
 					// Persist the choice to the chat agent's frontmatter so
 					// future sessions start with the same model. Best-effort:
@@ -559,16 +590,46 @@ func (s *Session) Run() {
 					if err := WriteChatAgentModel(s.paths, s.chatAgent, spec); err != nil {
 						log.Printf("[session] WARN: failed to persist model choice to %s.md: %v", s.chatAgent, err)
 					}
+					s.persist()
 				}
 			case "session.trim":
 				var data protocol.SessionTrimData
 				json.Unmarshal(cmd.Data, &data)
 				s.trimHistory(data.TurnIdx)
+				s.persist()
 			case "session.close":
+				s.closedByUser = true
 				return
 			}
 		}
 	}
+}
+
+// applyModel resolves spec → LLM client and, on success, swaps in the client,
+// updates s.model, and clears configErr. On failure it mutates no session state
+// and returns the error for the caller to handle (initBrain records it as the
+// unconfigured state; set_model keeps the prior working client). It never
+// fabricates a client, so a missing credential can't leak into an LLM request.
+func (s *Session) applyModel(spec string, maxTokens int64) error {
+	client, err := llm.NewFromModel(spec, s.server.pluginConfig, llm.DefaultEffortFromSpec(spec), maxTokens)
+	if err != nil {
+		return err
+	}
+	s.llm = client
+	s.model = spec
+	s.configErr = nil
+	return nil
+}
+
+// unconfiguredMessage renders the user-facing error for the session's current
+// configErr. Missing credentials get a friendly, actionable message keyed by
+// the model's display name; any other construction failure shows the raw error.
+func (s *Session) unconfiguredMessage() string {
+	if errors.Is(s.configErr, llm.ErrNoCredential) {
+		name := providers.Default().DisplayName(s.model)
+		return fmt.Sprintf("There are no credentials set to access %s. Go to Models (F3) to set your credentials.", name)
+	}
+	return s.configErr.Error()
 }
 
 // initBrain ensures the brain index exists (running brain.init if needed),
@@ -581,9 +642,9 @@ func (s *Session) initBrain() {
 	if handler != nil {
 		resp, err := handler(map[string]any{
 			"params": map[string]any{
-				"project_path":   s.cwd,
-				"brain_dir":      s.paths.Brain(),
-				"settings_paths": s.paths.Settings(),
+				"project_path":    s.cwd,
+				"brain_dir":       s.paths.Brain(),
+				"languages_paths": []string{s.paths.LanguagesFile()},
 			},
 		})
 		if err != nil || resp["status"] != "ok" {
@@ -617,7 +678,7 @@ func (s *Session) initBrain() {
 	projectConfig := LoadProjectConfig(s.paths.Settings()...)
 	s.projectConfig = projectConfig
 	s.chatAgent = projectConfig.Agent
-	s.workflows = projectConfig.Workflows
+	s.setWorkflows(LoadWorkflowsFile(s.paths.WorkflowsFile()))
 
 	// Rebuild the tool schema slice with the session-configured timeout
 	// bounds so the LLM reads the real floor/cap in the bash and glob_files
@@ -645,30 +706,35 @@ func (s *Session) initBrain() {
 	}
 
 	// Apply tool filtering AND model selection from the chat agent's
-	// frontmatter (e.g. general.md). This mirrors what subagents do via
-	// FilterToolSchemasWithBounds — the chat agent's `model:` field is the
-	// authoritative source for the session's model.
+	// frontmatter (e.g. general.md). The chat agent's `model:` field is the
+	// authoritative source for the session's model, falling back to the
+	// daemon default (s.model) when the frontmatter omits it.
 	agentFilePath := s.resolveAgentPath(s.chatAgent + ".md")
+	modelSpec := s.model
+	var modelMaxTokens int64
 	if agentCfg, err := parseAgentFile(agentFilePath); err == nil {
 		if len(agentCfg.Tools) > 0 {
 			s.tools = FilterToolSchemasWithBounds(agentCfg.Tools, tDef, tMax)
 			log.Printf("[session] chat agent tools from frontmatter: %v", agentCfg.Tools)
 		}
 		if agentCfg.Model != "" {
-			spec := agentCfg.Model
-			// Every model spec must carry an explicit provider prefix.
-			// Bare names (e.g. legacy "claude-sonnet-4-6") will fail in
-			// llm.NewFromModel with a clear error and the session keeps
-			// the daemon default.
-			client, err := llm.NewFromModel(spec, s.server.pluginConfig, llm.DefaultEffortFromSpec(spec), int64(agentCfg.MaxTokens))
-			if err != nil {
-				log.Printf("[session] WARN: cannot construct LLM for agent %q (model=%q): %v — keeping default", s.chatAgent, spec, err)
-			} else {
-				s.llm = client
-				s.model = spec
-				log.Printf("[session] chat agent model: %s (provider=%s)", spec, client.Provider())
-			}
+			modelSpec = agentCfg.Model
+			modelMaxTokens = int64(agentCfg.MaxTokens)
 		}
+	}
+
+	// Resolve the session's LLM client from the authoritative model spec. On
+	// failure (e.g. no credential for the provider) the session enters the
+	// unconfigured state: s.llm stays nil and the error surfaces to the UI on
+	// the next input attempt, rather than fabricating a client that would leak
+	// the missing credential into a doomed LLM request.
+	if err := s.applyModel(modelSpec, modelMaxTokens); err != nil {
+		s.configErr = err
+		s.model = modelSpec
+		s.llm = nil
+		log.Printf("[session] WARN: no usable LLM client for %q (model=%q): %v — session unconfigured", s.chatAgent, modelSpec, err)
+	} else {
+		log.Printf("[session] chat agent model: %s (provider=%s)", s.model, s.llm.Provider())
 	}
 
 	if projectConfig.HasFeature(FeatureToolOrchestrator) {
@@ -714,27 +780,77 @@ func (s *Session) initBrain() {
 		}
 	}
 
-	if len(s.workflows) > 0 {
-		log.Printf("[session] loaded %d workflow(s) from config", len(s.workflows))
+	if n := len(s.snapshotWorkflows()); n > 0 {
+		log.Printf("[session] loaded %d workflow(s) from config", n)
+	}
+
+	// Expose the `skill` tool only when skills are loaded. Appended after all
+	// tool-list filtering (like MCP tools) so it survives agent tool restrictions.
+	if s.skills != nil && s.skills.Count() > 0 {
+		s.tools = append(s.tools, SkillToolSchema())
 	}
 	log.Printf("[session] chat agent: %s", s.chatAgent)
-
 	s.emit("event.init_state", protocol.EventInitState{State: int(protocol.InitDone), Model: s.model})
 	s.emit("event.workflows_available", protocol.EventWorkflowsAvailable{
 		Workflows: s.workflowInfoList(),
 	})
+	s.emit("event.skills_available", protocol.EventSkillsAvailable{
+		Skills: s.skillInfoList(),
+	})
+}
+
+// skillInfoList returns the loaded skills as name/description pairs, sorted by
+// name, for slash-command autocomplete in the UI.
+func (s *Session) skillInfoList() []protocol.SkillInfo {
+	if s.skills == nil {
+		return nil
+	}
+	all := s.skills.All()
+	infos := make([]protocol.SkillInfo, 0, len(all))
+	for name, sk := range all {
+		infos = append(infos, protocol.SkillInfo{Name: name, Description: sk.Description})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
+	return infos
 }
 
 // workflowInfoList returns the list of WorkflowInfo in config order.
 func (s *Session) workflowInfoList() []protocol.WorkflowInfo {
-	if len(s.workflows) == 0 {
+	wfs := s.snapshotWorkflows()
+	if len(wfs) == 0 {
 		return nil
 	}
-	infos := make([]protocol.WorkflowInfo, len(s.workflows))
-	for i, wf := range s.workflows {
+	infos := make([]protocol.WorkflowInfo, len(wfs))
+	for i, wf := range wfs {
 		infos[i] = protocol.WorkflowInfo{Name: wf.Name}
 	}
 	return infos
+}
+
+// snapshotWorkflows returns the current workflow slice under the read lock.
+func (s *Session) snapshotWorkflows() []*WorkflowDef {
+	s.workflowsMu.RLock()
+	defer s.workflowsMu.RUnlock()
+	return s.workflows
+}
+
+// setWorkflows swaps the workflow slice under the write lock.
+func (s *Session) setWorkflows(wfs []*WorkflowDef) {
+	s.workflowsMu.Lock()
+	s.workflows = wfs
+	s.workflowsMu.Unlock()
+}
+
+// ReloadWorkflows swaps in a freshly-loaded workflow list and re-emits
+// event.workflows_available so the TUI refreshes its slash menu and Shift+Tab
+// cycle live. Called by the daemon config watcher when config/workflow.json
+// changes on disk. A workflow already mid-execution holds its own definition,
+// so this only affects the list of *available* workflows.
+func (s *Session) ReloadWorkflows(wfs []*WorkflowDef) {
+	s.setWorkflows(wfs)
+	s.emit("event.workflows_available", protocol.EventWorkflowsAvailable{
+		Workflows: s.workflowInfoList(),
+	})
 }
 
 // brainDir returns the path to the brain index directory.
@@ -831,6 +947,15 @@ func (s *Session) buildSystemPrompt() []llm.SystemBlock {
 			blocks = append(blocks, llm.SystemBlock{Text: text})
 		}
 		log.Printf("[session] loaded %d instruction file(s)", len(instrFiles))
+	}
+
+	// Inject available-skills metadata (level 1 of progressive disclosure):
+	// just names + descriptions, so the model knows what it can load via the
+	// `skill` tool without paying for the full bodies up front.
+	if s.skills != nil && s.skills.Count() > 0 {
+		if block := s.skills.FormatForSystemPrompt(); block != "" {
+			blocks = append(blocks, llm.SystemBlock{Text: block})
+		}
 	}
 
 	return blocks
@@ -1039,6 +1164,13 @@ func (s *Session) executeToolDirect(ctx context.Context, name string, params map
 		return blocked
 	}
 
+	// Schema validation: reject malformed tool calls (missing required field,
+	// wrong-typed field) before any handler runs, so the model gets a clear
+	// error instead of a handler silently proceeding with a zero value.
+	if err := validateToolInput(name, params); err != nil {
+		return &ToolResult{Output: err.Error(), IsError: true}
+	}
+
 	// If the session has automatic write permission disabled, intercept write-class
 	// tools and request user confirmation before executing them.
 	if !s.enableAutomaticWritePermission && writeClassTools[name] {
@@ -1078,6 +1210,22 @@ func (s *Session) executeToolDirect(ctx context.Context, name string, params map
 		}
 		params["_requested_dirs"] = dirs
 		return &ToolResult{NeedsConfirmation: true, ToolName: name, Params: params}
+	}
+
+	// Route the `skill` tool inline: it needs the session's skill registry,
+	// which server-level handlers can't reach. Returns the skill body plus a
+	// listing of bundled files (progressive disclosure levels 2 and 3).
+	if name == "skill" {
+		skillName, _ := params["name"].(string)
+		if skillName == "" {
+			return &ToolResult{Output: "skill: missing required field \"name\"", IsError: true}
+		}
+		sk := s.skills.Get(skillName)
+		if sk == nil {
+			return &ToolResult{Output: fmt.Sprintf("skill: no skill named %q", skillName), IsError: true}
+		}
+		args, _ := params["arguments"].(string)
+		return &ToolResult{Output: sk.LoadForTool(args)}
 	}
 
 	// Route MCP tools directly to the session's MCP pool.
@@ -1226,6 +1374,13 @@ func (s *Session) executeToolConfirmed(ctx context.Context, name string, params 
 	// editing it (either directly, or inheriting from the parent's reads).
 	if blocked := s.enforceReadGate(name, params); blocked != nil {
 		return blocked
+	}
+
+	// Schema validation: same gate as executeToolDirect, covering the
+	// subagent/workflow entry point. MCP tools have no local schema and are
+	// passed through (validateToolInput returns nil for them).
+	if err := validateToolInput(name, params); err != nil {
+		return &ToolResult{Output: err.Error(), IsError: true}
 	}
 
 	if dirs := s.detectOutsideDirs(name, params); len(dirs) > 0 && !s.enableAutomaticDirectoryAccess {
@@ -1514,6 +1669,58 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 		return
 	}
 
+	// Unconfigured session: no usable LLM client (e.g. no credential for the
+	// selected model's provider). Surface the error to the UI without ever
+	// contacting the LLM. Placed before /compact, which also needs the client.
+	if s.configErr != nil {
+		s.emit("event.error", protocol.EventError{Message: s.unconfiguredMessage()})
+		s.emit("event.agent_done", nil)
+		return
+	}
+
+	// /compact [N] — summarize older turns to free context. Handled daemon-side
+	// because it mutates s.messages and needs an LLM call.
+	if text == "/compact" || strings.HasPrefix(text, "/compact ") {
+		n := 0
+		if fields := strings.Fields(text); len(fields) > 1 {
+			v, err := strconv.Atoi(fields[1])
+			if err != nil || v < 1 {
+				s.emit("event.error", protocol.EventError{Message: "Usage: /compact [N]  (N = turn number)"})
+				s.emit("event.agent_done", nil)
+				return
+			}
+			n = v
+		}
+		s.mu.Lock()
+		keepFromMsgIdx, summarizedTurns, ok := s.resolveCompactionKeep(n)
+		s.mu.Unlock()
+		if !ok {
+			s.emit("event.error", protocol.EventError{Message: "Nothing to compact (no earlier turns, or N out of range)."})
+			s.emit("event.agent_done", nil)
+			return
+		}
+		s.compactMessages(keepFromMsgIdx, summarizedTurns, false)
+		s.emit("event.agent_done", nil)
+		return
+	}
+
+	// /<skill-name> [args] — explicit skill invocation. If the leading slash
+	// token names a loaded skill, render its body (with args substituted) and
+	// use that as the turn's user message. This is the user-driven counterpart
+	// to the model-driven `skill` tool.
+	if strings.HasPrefix(text, "/") && s.skills != nil && s.skills.Count() > 0 {
+		rest := strings.TrimPrefix(text, "/")
+		name := rest
+		args := ""
+		if i := strings.IndexByte(rest, ' '); i >= 0 {
+			name = rest[:i]
+			args = strings.TrimSpace(rest[i+1:])
+		}
+		if sk := s.skills.Get(name); sk != nil {
+			text = sk.LoadForTool(args)
+		}
+	}
+
 	// Validate attachments before adding
 	for _, att := range attachments {
 		if err := protocol.ValidateAttachment(att); err != nil {
@@ -1522,12 +1729,13 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 			return
 		}
 	}
-	
+
 	s.AddUserMessage(text, attachments...)
 
 	// Inner loop: agent turns
 	todoNudges := 0
 	for {
+		s.maybeAutoCompact()
 		system := s.buildSystemPrompt()
 
 		msg, elapsed, err := s.streamWithRetry(system, func(delta string) {
@@ -1555,6 +1763,10 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 			ElapsedMs:           elapsed.Milliseconds(),
 		})
 		s.accumulateTurnTelemetry(msg.Usage.InputTokens, msg.Usage.OutputTokens, msg.Usage.CacheCreationTokens, msg.Usage.CacheReadTokens, elapsed.Milliseconds(), countToolUses(msg))
+
+		s.mu.Lock()
+		s.lastInputTokens = msg.Usage.InputTokens + msg.Usage.CacheReadTokens + msg.Usage.CacheCreationTokens
+		s.mu.Unlock()
 
 		LogLLMCall(s.model, system, s.messages, s.tools, msg)
 		s.messages = append(s.messages, msg.ToParam())
@@ -1597,10 +1809,189 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 	copy(snapshot, s.messages)
 	s.turnSnapshots = append(s.turnSnapshots, snapshot)
 	s.mu.Unlock()
+	s.persist()
 	s.emit("event.agent_done", nil)
 }
 
+// compactionSystemPrompt instructs the model to produce a dense, faithful
+// summary of the dropped conversation prefix during compaction.
+const compactionSystemPrompt = `You are compacting a software-engineering conversation to save context.
+Summarize the messages below into a dense, faithful briefing that lets the assistant continue the work without re-reading them.
 
+Preserve, in this order:
+1. The user's goals and any explicit instructions or constraints still in effect.
+2. Key decisions made and their rationale.
+3. Files created/edited/read (exact paths) and the gist of important changes.
+4. Important tool outputs, command results, errors, and their resolutions.
+5. Open tasks, TODOs, and unresolved questions.
+
+Be concise but specific — keep identifiers, paths, and commands verbatim. Do not invent facts. Do not include a preamble or sign-off; output only the summary.`
+
+// compactionSummaryPrefix labels the synthetic user message that replaces the
+// compacted prefix so the assistant knows it is reading a summary.
+const compactionSummaryPrefix = "[Summary of earlier conversation, compacted to save context]\n\n"
+
+// compactionRequestPrompt is appended as a trailing user message before the
+// summarization call. The dropped prefix always ends on an assistant message
+// (turn boundaries land after the assistant's final response); sending it as-is
+// makes the API treat it as an assistant prefill, which some models reject. The
+// trailing user turn keeps the request valid and states the summarization ask
+// explicitly.
+const compactionRequestPrompt = "Summarize the conversation above following the instructions in the system prompt."
+
+// resolveCompactionKeep maps a compaction policy to a message-index boundary
+// (keepFromMsgIdx) and the count of turns being summarized. explicitN > 0 means
+// /compact N (keep turns after N); otherwise the configured policy applies.
+// Returns ok=false when there is nothing to compact. Must be called under s.mu.
+func (s *Session) resolveCompactionKeep(explicitN int) (keepFromMsgIdx, summarizedTurns int, ok bool) {
+	total := len(s.turnSnapshots)
+	if total == 0 {
+		return 0, 0, false
+	}
+
+	var dropTurns int
+	switch {
+	case explicitN > 0:
+		if explicitN >= total {
+			return 0, 0, false // keep "turns after N" — N must leave a tail
+		}
+		dropTurns = explicitN
+	case s.projectConfig.Compaction.KeepLastNTurns > 0:
+		keep := s.projectConfig.Compaction.KeepLastNTurns
+		if keep >= total {
+			return 0, 0, false
+		}
+		dropTurns = total - keep
+	default: // ratio
+		keep := int(math.Ceil(s.projectConfig.Compaction.KeepRatio * float64(total)))
+		if keep < 1 {
+			keep = 1
+		}
+		if keep >= total {
+			return 0, 0, false
+		}
+		dropTurns = total - keep
+	}
+
+	// turnSnapshots[dropTurns-1] is the cumulative messages prefix through the
+	// last dropped turn — its length is the keep boundary. Snapshots are taken
+	// only at turn boundaries, so this never splits a tool_use/tool_result pair.
+	keepFromMsgIdx = len(s.turnSnapshots[dropTurns-1])
+	return keepFromMsgIdx, dropTurns, true
+}
+
+// maybeAutoCompact compacts the conversation when automatic compaction is
+// enabled, the model's context window is known, and the last turn's prompt
+// exceeded the configured threshold. Called at the top of the turn loop.
+func (s *Session) maybeAutoCompact() {
+	cfg := s.projectConfig.Compaction
+	if !cfg.Auto {
+		return
+	}
+	window := providers.Default().ContextWindow(s.model)
+	if window <= 0 {
+		return // unknown window → safe fallback, no auto-compaction
+	}
+
+	s.mu.Lock()
+	if s.lastInputTokens < int64(cfg.Threshold*float64(window)) {
+		s.mu.Unlock()
+		return
+	}
+	keepFromMsgIdx, summarizedTurns, ok := s.resolveCompactionKeep(0)
+	s.mu.Unlock()
+	if !ok {
+		// Threshold breached but a single trailing turn already fills the
+		// window — nothing safe to compact. Warn once and continue.
+		log.Printf("\033[33m[session] auto-compaction skipped: nothing to compact below threshold\033[0m")
+		return
+	}
+	s.compactMessages(keepFromMsgIdx, summarizedTurns, true)
+}
+
+// compactMessages summarizes s.messages[:keepFromMsgIdx] and replaces the
+// history with [summary, ...tail], rebuilding turnSnapshots to keep the
+// retained turns' boundaries consistent. summarizedTurns is the number of turns
+// folded into the summary. auto distinguishes the trigger source for the event.
+func (s *Session) compactMessages(keepFromMsgIdx, summarizedTurns int, auto bool) {
+	s.mu.Lock()
+	if keepFromMsgIdx <= 0 || keepFromMsgIdx >= len(s.messages) {
+		s.mu.Unlock()
+		s.emit("event.error", protocol.EventError{Message: "Nothing to compact."})
+		return
+	}
+	dropped := make([]llm.MessageParam, keepFromMsgIdx)
+	copy(dropped, s.messages[:keepFromMsgIdx])
+	fromTokens := s.lastInputTokens
+	s.mu.Unlock()
+
+	summary, err := s.summarizeMessages(dropped)
+	if err != nil {
+		s.emit("event.error", protocol.EventError{Message: "Compaction failed: " + err.Error()})
+		return
+	}
+
+	summaryMsg := llm.NewUserMessage(llm.NewTextBlock(compactionSummaryPrefix + summary))
+
+	s.mu.Lock()
+	// History is only mutated by the single-threaded turn loop / command
+	// handler, so keepFromMsgIdx is still valid here.
+	if keepFromMsgIdx >= len(s.messages) {
+		s.mu.Unlock()
+		s.emit("event.error", protocol.EventError{Message: "Nothing to compact."})
+		return
+	}
+	tail := s.messages[keepFromMsgIdx:]
+	newMessages := make([]llm.MessageParam, 0, 1+len(tail))
+	newMessages = append(newMessages, summaryMsg)
+	newMessages = append(newMessages, tail...)
+
+	// Rebuild turnSnapshots for the kept turns, re-based onto newMessages. The
+	// summary occupies index 0, so a kept turn's old boundary len(s_j) maps to
+	// 1 + (len(s_j) - keepFromMsgIdx).
+	var newSnapshots [][]llm.MessageParam
+	for j := summarizedTurns; j < len(s.turnSnapshots); j++ {
+		boundary := 1 + (len(s.turnSnapshots[j]) - keepFromMsgIdx)
+		if boundary < 1 {
+			boundary = 1
+		}
+		if boundary > len(newMessages) {
+			boundary = len(newMessages)
+		}
+		snap := make([]llm.MessageParam, boundary)
+		copy(snap, newMessages[:boundary])
+		newSnapshots = append(newSnapshots, snap)
+	}
+
+	s.messages = newMessages
+	s.turnSnapshots = newSnapshots
+	s.lastInputTokens = 0 // recomputed on the next turn; avoids immediate retrigger
+	s.mu.Unlock()
+
+	s.emit("event.compacted", protocol.EventCompacted{
+		FromTokens:      fromTokens,
+		SummarizedTurns: summarizedTurns,
+		Auto:            auto,
+	})
+}
+
+// summarizeMessages runs a one-shot, tool-free LLM call to summarize the given
+// messages. Streaming deltas are discarded (no UI side-effects).
+func (s *Session) summarizeMessages(msgs []llm.MessageParam) (string, error) {
+	system := []llm.SystemBlock{{Text: compactionSystemPrompt}}
+	// Ensure the conversation ends on a user message: the dropped prefix ends on
+	// an assistant turn, which the API would otherwise treat as a prefill.
+	msgs = append(msgs[:len(msgs):len(msgs)], llm.NewUserMessage(llm.NewTextBlock(compactionRequestPrompt)))
+	msg, _, err := s.llm.StreamMessage(s.ctx, system, msgs, nil, func(string) {}, func(string) {})
+	if err != nil {
+		return "", err
+	}
+	summary := strings.TrimSpace(msg.TextContent)
+	if summary == "" {
+		return "", fmt.Errorf("summarization produced no text")
+	}
+	return summary, nil
+}
 
 // interactiveTools are tools that require sequential execution (user interaction, blocking waits).
 var interactiveTools = map[string]bool{
@@ -1623,18 +2014,18 @@ var writeTools = map[string]bool{
 
 // toolTask holds parsed info for a single tool call in a batch.
 type toolTask struct {
-	toolUse     llm.ToolCall
-	input       map[string]any
-	summary     string
-	reason      string
+	toolUse llm.ToolCall
+	input   map[string]any
+	summary string
+	reason  string
 	// Bash-specific alternative-tool justifications (empty or "N/A" → omitted).
 	bashReasonNotReadFile       string
 	bashReasonNotEditFile       string
 	bashReasonNotGlobFiles      string
 	bashReasonToIncreaseTimeout string
-	interactive            bool
-	result                 *ToolResult
-	apiResult              llm.ContentBlock
+	interactive                 bool
+	result                      *ToolResult
+	apiResult                   llm.ContentBlock
 }
 
 // dispatchOptions configures the unified tool dispatcher.
@@ -1728,15 +2119,15 @@ func dispatchToolCalls(ctx context.Context, msg *llm.Message, opts dispatchOptio
 		summary := SummarizeToolInput(toolUse.Name, input)
 
 		t := &toolTask{
-			toolUse:                toolUse,
-			input:                  input,
-			summary:                summary,
-			reason:                 reason,
-			bashReasonNotReadFile:        bashReasonNotReadFile,
-			bashReasonNotEditFile:        bashReasonNotEditFile,
-			bashReasonNotGlobFiles:       bashReasonNotGlobFiles,
+			toolUse:                     toolUse,
+			input:                       input,
+			summary:                     summary,
+			reason:                      reason,
+			bashReasonNotReadFile:       bashReasonNotReadFile,
+			bashReasonNotEditFile:       bashReasonNotEditFile,
+			bashReasonNotGlobFiles:      bashReasonNotGlobFiles,
 			bashReasonToIncreaseTimeout: bashReasonToIncreaseTimeout,
-			interactive:            interactiveTools[toolUse.Name] && opts.handleSpecial != nil,
+			interactive:                 interactiveTools[toolUse.Name] && opts.handleSpecial != nil,
 		}
 
 		if t.interactive {
@@ -2037,12 +2428,19 @@ func providerFor(model string) string {
 	return "openai"
 }
 
-
 // handleWorkflowCommand handles a session.workflow command by looking up and executing
 // the workflow matching the given name.
 func (s *Session) handleWorkflowCommand(name, text string) {
+	// Unconfigured session: no usable LLM client. Workflows stream too, so
+	// refuse before doing any work and surface the error to the UI.
+	if s.configErr != nil {
+		s.emit("event.error", protocol.EventError{Message: s.unconfiguredMessage()})
+		s.emit("event.agent_done", nil)
+		return
+	}
+
 	var wf *WorkflowDef
-	for _, w := range s.workflows {
+	for _, w := range s.snapshotWorkflows() {
 		if w.Name == name {
 			wf = w
 			break
@@ -2057,6 +2455,8 @@ func (s *Session) handleWorkflowCommand(name, text string) {
 	}
 
 	s.sessionMode = "workflow"
+	s.activeWorkflow = name
+	s.persist()
 
 	planCtx, planCancel := context.WithCancel(s.ctx)
 	s.planCancel = planCancel

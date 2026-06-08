@@ -3,13 +3,14 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/kirby88/vix/internal/protocol"
+	"github.com/get-vix/vix/internal/protocol"
 )
 
 // ToolResult holds the result of a tool execution from the daemon.
@@ -30,7 +31,7 @@ type Client struct {
 	// `auth_token` field. Set via SetAuthToken from cmd/vix/main.go after
 	// reading the token file pointed at by -auth-token-path. Empty when the
 	// daemon is also unauthenticated (the default when vixd was started
-// without -auth-token-path, or in-process test embeddings).
+	// without -auth-token-path, or in-process test embeddings).
 	authToken string
 }
 
@@ -103,6 +104,29 @@ func (c *Client) Ping() bool {
 		return false
 	}
 	return resp["status"] == "ok"
+}
+
+// ListSessions returns the persisted open sessions for cwd, so the TUI can
+// reopen them on launch. Sessions are stored globally (~/.vix/sessions) and
+// filtered by cwd daemon-side.
+func (c *Client) ListSessions(cwd, configDir string) ([]protocol.SessionSummary, error) {
+	resp, err := c.sendRequest(map[string]any{
+		"command":    "session.list",
+		"cwd":        cwd,
+		"config_dir": configDir,
+	})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp["sessions"])
+	if err != nil {
+		return nil, err
+	}
+	var out []protocol.SessionSummary
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ExecuteTool sends a tool execution request to the daemon.
@@ -239,6 +263,32 @@ func (sc *SessionClient) ConnectFork(cwd, configDir, model string, forceInit boo
 	})
 }
 
+// ErrSessionNotFound is returned by Attach when the daemon has no persisted
+// record for the requested ID (e.g. it was lost in a daemon restart before its
+// first flush). Callers should orphan the session rather than retry.
+var ErrSessionNotFound = errors.New("session not found")
+
+// ErrSessionBusy is returned by Attach when the requested session is already
+// open in another connection (exclusive single-writer ownership). Callers can
+// retry later (the owner may disconnect) or restore/attach a different session.
+var ErrSessionBusy = errors.New("session busy")
+
+// Attach establishes a persistent connection and resumes the persisted session
+// with the given ID. On success the daemon replays the conversation via
+// event.replay. Returns ErrSessionNotFound when no record exists on disk.
+func (sc *SessionClient) Attach(cwd, configDir, model string, forceInit bool, enableAutomaticWritePermission bool, enableAutomaticDirectoryAccess bool, headless bool, attachSessionID string) error {
+	return sc.connectWith(protocol.SessionStartData{
+		CWD:                            cwd,
+		ConfigDir:                      configDir,
+		Model:                          model,
+		ForceInit:                      forceInit,
+		EnableAutomaticWritePermission: enableAutomaticWritePermission,
+		EnableAutomaticDirectoryAccess: enableAutomaticDirectoryAccess,
+		Headless:                       headless,
+		AttachSessionID:                attachSessionID,
+	})
+}
+
 // connectWith dials the daemon and starts a session with the given start data.
 func (sc *SessionClient) connectWith(startData protocol.SessionStartData) error {
 	conn, err := net.Dial("unix", sc.socketPath)
@@ -267,8 +317,19 @@ func (sc *SessionClient) connectWith(startData protocol.SessionStartData) error 
 	}
 	if event.Type == "event.error" {
 		conn.Close()
-		data, _ := json.Marshal(event.Data)
-		return fmt.Errorf("session start failed: %s", string(data))
+		raw, _ := json.Marshal(event.Data)
+		var ee protocol.EventError
+		json.Unmarshal(raw, &ee)
+		if ee.Code == "session_not_found" {
+			return ErrSessionNotFound
+		}
+		if ee.Code == "session_busy" {
+			return ErrSessionBusy
+		}
+		if ee.Message != "" {
+			return fmt.Errorf("session start failed: %s", ee.Message)
+		}
+		return fmt.Errorf("session start failed: %s", string(raw))
 	}
 	if event.Type == "event.session_started" {
 		data, _ := json.Marshal(event.Data)
@@ -432,4 +493,47 @@ func (sc *SessionClient) sendCommand(cmd protocol.SessionCommand) error {
 	data = append(data, '\n')
 	_, err = sc.conn.Write(data)
 	return err
+}
+
+// InstanceClient is a long-lived control connection that registers the running
+// vix process as an "instance" with the daemon. The daemon counts these to know
+// how many vix processes are attached (independently of sessions). The client
+// sends a single instance.register command and then holds the connection open
+// for the process lifetime; closing it (clean exit or process death) tells the
+// daemon this instance is gone.
+type InstanceClient struct {
+	conn net.Conn
+}
+
+// RegisterInstance dials the daemon and registers this process as an attached
+// instance, returning a handle whose Close ends the registration. mode is
+// advisory ("tui" | "headless"). On any failure it returns an error and the
+// caller may simply proceed without registration (the daemon then can't
+// exit-with-clients on this process, which is a safe degradation).
+func RegisterInstance(socketPath, authToken, mode string) (*InstanceClient, error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("daemon connect: %w", err)
+	}
+	data, _ := json.Marshal(protocol.InstanceRegisterData{Mode: mode})
+	cmd := protocol.SessionCommand{Type: "instance.register", AuthToken: authToken, Data: data}
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	payload = append(payload, '\n')
+	if _, err := conn.Write(payload); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("register instance: %w", err)
+	}
+	return &InstanceClient{conn: conn}, nil
+}
+
+// Close ends the instance registration, signalling the daemon that this process
+// has detached.
+func (ic *InstanceClient) Close() {
+	if ic != nil && ic.conn != nil {
+		ic.conn.Close()
+	}
 }
