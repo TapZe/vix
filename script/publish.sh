@@ -202,9 +202,9 @@ echo "==> Homebrew formulas written to $DIST_DIR/vix.rb + vix-local.rb"
 
 # --- Build changelog ---
 # Either load a user-supplied file (--changelog <path>) or derive one from the
-# commits since the previous tag. Either way we show it and ask for a y/N
-# confirmation before publishing — the release notes are user-visible and
-# worth a sanity check.
+# commits since the previous tag. Either way we open it in neovim for review and
+# editing before publishing — the release notes are user-visible and worth a
+# sanity check. Quitting neovim accepts whatever is in the buffer.
 if [[ -n "$CHANGELOG_FILE" ]]; then
   echo "==> Loading changelog from $CHANGELOG_FILE..."
   CHANGELOG=$(cat "$CHANGELOG_FILE")
@@ -227,17 +227,28 @@ if [[ -z "$CHANGELOG" ]]; then
   CHANGELOG="- (no new commits)"
 fi
 
+# Open the changelog in neovim for review/editing. Quitting neovim accepts the
+# buffer contents as the final changelog (no separate confirmation prompt).
+EDITOR_BIN="${EDITOR:-nvim}"
+CHANGELOG_TMP=$(mktemp -t vix-changelog.XXXXXX.md)
+trap 'rm -f "$CHANGELOG_TMP"' EXIT
+printf '%s\n' "$CHANGELOG" > "$CHANGELOG_TMP"
+
+echo ""
+echo "==> Opening changelog $RANGE_LABEL in $EDITOR_BIN — edit, then quit to accept..."
+"$EDITOR_BIN" "$CHANGELOG_TMP"
+
+CHANGELOG=$(cat "$CHANGELOG_TMP")
+if [[ -z "${CHANGELOG//[[:space:]]/}" ]]; then
+  echo "!! Changelog is empty after editing. Aborting."
+  exit 1
+fi
+
 echo ""
 echo "----- Changelog $RANGE_LABEL -----"
 echo "$CHANGELOG"
 echo "----------------------------------"
 echo ""
-read -r -p "Use this as the Discord changelog? [y/N] " CHANGELOG_OK
-if [[ ! "$CHANGELOG_OK" =~ ^[Yy]$ ]]; then
-  echo "Aborted by user."
-  exit 1
-fi
-
 # Handle --force: delete existing release
 if [[ "$FORCE" == true ]]; then
   echo "==> Deleting existing release $VERSION (if any)..."
