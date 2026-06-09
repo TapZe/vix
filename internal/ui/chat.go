@@ -276,6 +276,15 @@ func summarizeToolOutput(name, output string) string {
 	}
 
 	switch name {
+	case "skill":
+		// The skill tool's output is the full rendered body (sent to the model);
+		// in the viewport just preview its first non-empty line.
+		for _, line := range strings.Split(output, "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				return trimmed
+			}
+		}
+		return "skill loaded"
 	case "read_file", "read_minified_file":
 		return fmt.Sprintf("%d lines read", lines)
 	case "grep":

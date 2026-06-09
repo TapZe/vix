@@ -637,6 +637,26 @@ func (s *Session) unconfiguredMessage() string {
 func (s *Session) initBrain() {
 	s.emit("event.init_state", protocol.EventInitState{State: int(protocol.InitInProgress)})
 
+	// Load skills and advertise them to the UI up front, before the
+	// potentially slow brain.init below. Skill scanning only reads the
+	// .vix/skills/ directories and has no dependency on the brain/LSP, so
+	// emitting event.skills_available here lets the slash menu autocomplete
+	// custom skills immediately instead of waiting for LSP initialization.
+	// Pass layers highest-precedence-first (reverse of the "later wins" order
+	// used for merged config): project before home.
+	skillDirs := s.paths.Skills()
+	reversed := make([]string, len(skillDirs))
+	for i, d := range skillDirs {
+		reversed[len(skillDirs)-1-i] = d
+	}
+	s.skills = agent.LoadSkills(reversed...)
+	if s.skills.Count() > 0 {
+		log.Printf("[session] loaded %d skill(s)", s.skills.Count())
+	}
+	s.emit("event.skills_available", protocol.EventSkillsAvailable{
+		Skills: s.skillInfoList(),
+	})
+
 	// Initialize language map and LSP pool via brain.init
 	handler := s.server.GetHandler("brain.init")
 	if handler != nil {
@@ -660,17 +680,6 @@ func (s *Session) initBrain() {
 		}
 	}
 
-	// Load skills. Pass layers highest-precedence-first (reverse of the
-	// "later wins" order used for merged config): project before home.
-	skillDirs := s.paths.Skills()
-	reversed := make([]string, len(skillDirs))
-	for i, d := range skillDirs {
-		reversed[len(skillDirs)-1-i] = d
-	}
-	s.skills = agent.LoadSkills(reversed...)
-	if s.skills.Count() > 0 {
-		log.Printf("[session] loaded %d skill(s)", s.skills.Count())
-	}
 	if len(s.customAgents) > 0 {
 		log.Printf("[session] loaded %d custom agent(s) from .vix/agents/", len(s.customAgents))
 	}
@@ -793,9 +802,6 @@ func (s *Session) initBrain() {
 	s.emit("event.init_state", protocol.EventInitState{State: int(protocol.InitDone), Model: s.model})
 	s.emit("event.workflows_available", protocol.EventWorkflowsAvailable{
 		Workflows: s.workflowInfoList(),
-	})
-	s.emit("event.skills_available", protocol.EventSkillsAvailable{
-		Skills: s.skillInfoList(),
 	})
 	if cur, latest, url, method := s.server.UpdateStatus(); latest != "" {
 		s.emit("event.update_available", protocol.EventUpdateAvailable{
