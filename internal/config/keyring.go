@@ -93,7 +93,6 @@ func providerKeyringUser(provider string) string {
 	return provider + "-api-key"
 }
 
-
 // resolveKey searches env var, OS keychain, and .env files for the given variable name
 // and optional keyring user. Returns the value and source, or empty if not found.
 func resolveKey(envVar, keyringUser string) (string, KeySource) {
