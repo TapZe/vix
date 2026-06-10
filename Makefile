@@ -59,7 +59,9 @@ build-x:
 run-x: build-x
 	GOTRACEBACK=crash \
 	GORACE=halt_on_error=1 \
-	./bin/vix --pprof-port 6061 2>/tmp/vix-debug.log -disable-automatic-directory-access -disable-automatic-write-permission
+	./bin/vix --pprof-port 6061 2>/tmp/vix-debug.log 
+# 	To try with full restrictions
+#	./bin/vix --pprof-port 6061 2>/tmp/vix-debug.log -disable-automatic-directory-access -disable-automatic-write-permission
 
 # Local dev build — current platform only, fast
 build: build-d build-x
