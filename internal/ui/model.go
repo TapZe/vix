@@ -1235,7 +1235,24 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Restored sessions are waiting for their replay; show the placeholder
 		// (with an animated spinner) until it arrives.
 		restored.awaitingReplay = true
-		m.sessions = append(m.sessions, restored)
+		// Restore attaches run concurrently and complete in arbitrary order, so
+		// insert by creation time instead of appending: place the session before
+		// the first one that started later, keeping the list in the order the
+		// user started the conversations.
+		idx := len(m.sessions)
+		for i, s := range m.sessions {
+			if s.client != nil && s.client.StartedAt().After(msg.client.StartedAt()) {
+				idx = i
+				break
+			}
+		}
+		m.sessions = append(m.sessions, nil)
+		copy(m.sessions[idx+1:], m.sessions[idx:])
+		m.sessions[idx] = restored
+		if idx <= m.selectedSession {
+			m.selectedSession++
+		}
+		m.syncSessionsSelected()
 		return m, tea.Batch(startSessionEventLoop(msg.client), restored.thinkingAnim.Start())
 
 	case sessionRestoreFailedMsg:

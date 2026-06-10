@@ -140,9 +140,10 @@ func listOpenSessionRecords(paths config.VixPaths) []sessionRecord {
 		}
 		out = append(out, rec)
 	}
-	// Most-recently-active first so the TUI restores in a sensible order.
+	// Creation order (oldest first) so the TUI displays sessions in the order
+	// the user started them.
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].lastActivity().After(out[j].lastActivity())
+		return out[i].StartedAt.Before(out[j].StartedAt)
 	})
 	return out
 }

@@ -124,10 +124,10 @@ func TestListOpenExcludesClosed(t *testing.T) {
 
 	open1 := sampleRecord()
 	open1.ID = "open-1"
-	open1.LastRequestAt = time.Now().Add(-2 * time.Hour)
+	open1.StartedAt = time.Now().Add(-time.Hour)
 	open2 := sampleRecord()
 	open2.ID = "open-2"
-	open2.LastRequestAt = time.Now()
+	open2.StartedAt = time.Now().Add(-2 * time.Hour)
 	closed := sampleRecord()
 	closed.ID = "closed-1"
 
@@ -144,7 +144,7 @@ func TestListOpenExcludesClosed(t *testing.T) {
 	if len(recs) != 2 {
 		t.Fatalf("open count = %d, want 2", len(recs))
 	}
-	// Sorted most-recent first.
+	// Sorted by creation time, oldest first.
 	if recs[0].ID != "open-2" || recs[1].ID != "open-1" {
 		t.Errorf("unexpected order: %s, %s", recs[0].ID, recs[1].ID)
 	}
