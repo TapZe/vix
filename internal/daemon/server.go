@@ -291,6 +291,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// Hot-reload workflow.json / languages.json on save.
 	s.startConfigWatcher()
 
+	// One-shot stale trim of closed session records in the default global
+	// store (~/.vix/sessions/closed). Retention comes from settings.json
+	// (sessions.closed_retention_minutes, default one week, 0 = never).
+	// Config-dir override stores are not touched.
+	go func() {
+		mins := config.ClosedSessionRetentionMinutes()
+		paths := config.NewVixPaths("", config.HomeVixDir(), "")
+		trimStaleClosedSessions(paths, time.Duration(mins)*time.Minute)
+	}()
+
 	// Accept loop with context cancellation
 	go func() {
 		<-ctx.Done()
@@ -691,9 +701,18 @@ func (s *Server) handleSession(conn net.Conn, scanner *bufio.Scanner, startCmd p
 
 	// An explicit user close (the "x" action sends session.close) moves the
 	// record open/ -> closed/ so it is not reopened on next launch. A bare
-	// disconnect leaves it in open/ so the TUI restores it next run.
+	// disconnect leaves it in open/ so the TUI restores it next run. Empty
+	// conversations (no turn ever happened) are deleted outright — there is
+	// nothing worth archiving.
 	if session.closedByUser {
-		if err := moveSessionToClosed(session.paths, sessionID); err != nil {
+		session.mu.Lock()
+		empty := len(session.messages) == 0
+		session.mu.Unlock()
+		if empty {
+			if err := deleteSessionRecord(session.paths, sessionID); err != nil {
+				LogError("close session %s: delete empty record failed: %v", sessionID, err)
+			}
+		} else if err := moveSessionToClosed(session.paths, sessionID); err != nil {
 			LogError("close session %s: move to closed failed: %v", sessionID, err)
 		}
 	}

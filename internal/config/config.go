@@ -296,6 +296,65 @@ func SetCompactionAuto(v bool) error { return setCompactionField("auto", v) }
 // SetCompactionThreshold writes compaction.threshold to ~/.vix/settings.json.
 func SetCompactionThreshold(v float64) error { return setCompactionField("threshold", v) }
 
+// DefaultClosedSessionRetentionMinutes is the default retention for closed
+// session records: one week.
+const DefaultClosedSessionRetentionMinutes = 7 * 24 * 60
+
+// ClosedSessionRetentionMinutes reads sessions.closed_retention_minutes from
+// ~/.vix/settings.json. Closed session records older than this are deleted by
+// the daemon on startup. Defaults to one week when absent. 0 means never trim
+// (settable only by editing settings.json — the TUI does not offer it).
+func ClosedSessionRetentionMinutes() int {
+	p := filepath.Join(HomeVixDir(), "settings.json")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return DefaultClosedSessionRetentionMinutes
+	}
+	var cfg struct {
+		Sessions struct {
+			ClosedRetentionMinutes *int `json:"closed_retention_minutes"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil || cfg.Sessions.ClosedRetentionMinutes == nil {
+		return DefaultClosedSessionRetentionMinutes
+	}
+	if *cfg.Sessions.ClosedRetentionMinutes < 0 {
+		return DefaultClosedSessionRetentionMinutes
+	}
+	return *cfg.Sessions.ClosedRetentionMinutes
+}
+
+// SetClosedSessionRetentionMinutes writes sessions.closed_retention_minutes to
+// ~/.vix/settings.json, preserving other keys.
+func SetClosedSessionRetentionMinutes(v int) error {
+	home := HomeVixDir()
+	if home == "" {
+		return fmt.Errorf("no home directory")
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	p := filepath.Join(home, "settings.json")
+
+	raw := map[string]any{}
+	if data, err := os.ReadFile(p); err == nil {
+		_ = json.Unmarshal(data, &raw)
+	}
+
+	sessions, _ := raw["sessions"].(map[string]any)
+	if sessions == nil {
+		sessions = map[string]any{}
+	}
+	sessions["closed_retention_minutes"] = v
+	raw["sessions"] = sessions
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, out, 0o644)
+}
+
 // ThemeConfig holds user-configurable brand colors.
 type ThemeConfig struct {
 	Primary   string `json:"primary"`   // hex color like "#BC63FC"

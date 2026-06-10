@@ -727,9 +727,15 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if settingsItem(m.settingsCursor) == settingCompactionThreshold {
 					m.adjustCompactionThreshold(-0.05)
 				}
+				if settingsItem(m.settingsCursor) == settingClosedRetention {
+					m.adjustClosedRetention(-1)
+				}
 			case "right", "l":
 				if settingsItem(m.settingsCursor) == settingCompactionThreshold {
 					m.adjustCompactionThreshold(0.05)
+				}
+				if settingsItem(m.settingsCursor) == settingClosedRetention {
+					m.adjustClosedRetention(1)
 				}
 			}
 			return m, tea.Batch(cmds...)
@@ -2652,6 +2658,7 @@ func (m Model) View() tea.View {
 			telemetry:           config.TelemetryEnabled(),
 			compactionAuto:      config.CompactionAuto(),
 			compactionThreshold: config.CompactionThreshold(),
+			closedRetentionMins: config.ClosedSessionRetentionMinutes(),
 			updateCheck:         config.UpdateCheckEnabled(),
 			updateCurrent:       m.updateCurrent,
 			updateLatest:        m.updateLatest,

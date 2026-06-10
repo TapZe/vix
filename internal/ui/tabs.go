@@ -190,6 +190,7 @@ const (
 	settingTelemetry
 	settingCompactionAuto
 	settingCompactionThreshold
+	settingClosedRetention
 	settingsItemCount
 )
 
@@ -203,6 +204,7 @@ type settingsState struct {
 	telemetry           bool
 	compactionAuto      bool
 	compactionThreshold float64
+	closedRetentionMins int
 	updateCheck         bool
 	updateCurrent       string
 	updateLatest        string // newer release tag, "" when up-to-date/unknown
@@ -239,6 +241,8 @@ func (m *Model) toggleSetting(item settingsItem) {
 		_ = config.SetUpdateCheckEnabled(!config.UpdateCheckEnabled())
 	case settingCompactionThreshold:
 		// Threshold is adjusted with ←/→, not toggled.
+	case settingClosedRetention:
+		// Retention is adjusted with ←/→, not toggled.
 	case settingUpdateAction:
 		// Handled in the Settings key handler (model.go), not here — it triggers
 		// an install/quit rather than flipping a persisted flag.
@@ -288,6 +292,85 @@ func (m *Model) adjustCompactionThreshold(delta float64) {
 	}
 	v = float64(int(v*20+0.5)) / 20 // round to nearest 0.05
 	_ = config.SetCompactionThreshold(v)
+}
+
+// closedRetentionPresets is the ←/→ ladder for the closed-session retention
+// row, in minutes. "Never" (0) is deliberately not on the ladder — it is only
+// settable by editing settings.json by hand.
+var closedRetentionPresets = []int{
+	60,           // 1 hour
+	6 * 60,       // 6 hours
+	24 * 60,      // 1 day
+	3 * 24 * 60,  // 3 days
+	7 * 24 * 60,  // 1 week
+	14 * 24 * 60, // 2 weeks
+	30 * 24 * 60, // 1 month
+}
+
+// retentionLabel renders a retention value (minutes) for display.
+func retentionLabel(mins int) string {
+	switch {
+	case mins <= 0:
+		return "Never"
+	case mins == 60:
+		return "1 hour"
+	case mins < 24*60:
+		return fmt.Sprintf("%d hours", mins/60)
+	case mins == 24*60:
+		return "1 day"
+	case mins == 7*24*60:
+		return "1 week"
+	case mins == 14*24*60:
+		return "2 weeks"
+	case mins == 30*24*60:
+		return "1 month"
+	case mins%(24*60) == 0:
+		return fmt.Sprintf("%d days", mins/(24*60))
+	default:
+		return fmt.Sprintf("%d mn", mins)
+	}
+}
+
+// adjustClosedRetention steps the closed-session retention to the next (dir>0)
+// or previous (dir<0) preset. From a non-preset value (including the JSON-only
+// "Never"), adjusting steps onto the nearest preset in the requested direction.
+func (m *Model) adjustClosedRetention(dir int) {
+	cur := config.ClosedSessionRetentionMinutes()
+	idx := -1
+	for i, p := range closedRetentionPresets {
+		if p == cur {
+			idx = i
+			break
+		}
+	}
+	var next int
+	if idx >= 0 {
+		i := idx + dir
+		if i < 0 || i >= len(closedRetentionPresets) {
+			return
+		}
+		next = closedRetentionPresets[i]
+	} else {
+		// Off-ladder value: step onto the first preset above (→) or the last
+		// preset below (←) the current value. "Never" (0) always lands on the
+		// first preset.
+		next = closedRetentionPresets[0]
+		if dir > 0 {
+			for _, p := range closedRetentionPresets {
+				if p > cur {
+					next = p
+					break
+				}
+			}
+		} else if cur > 0 {
+			for _, p := range closedRetentionPresets {
+				if p < cur {
+					next = p
+				}
+			}
+		}
+	}
+	_ = config.SetClosedSessionRetentionMinutes(next)
 }
 
 // updateActionLabel returns the text for the selectable Updates action row,
@@ -419,7 +502,10 @@ func renderSettingsView(width, height int, s Styles, st settingsState) string {
 	toggleRow("Auto-compaction", st.compactionAuto)
 	sliderRow("Threshold       ", st.compactionThreshold)
 
-	lines = append(lines, "", dimStyle.Italic(true).Width(innerWidth).Render("↑↓ navigate · Enter toggle/select · ←→ adjust threshold"))
+	section("Sessions")
+	row(fmt.Sprintf("Closed session retention  ‹ %s ›", retentionLabel(st.closedRetentionMins)))
+
+	lines = append(lines, "", dimStyle.Italic(true).Width(innerWidth).Render("↑↓ navigate · Enter toggle/select · ←→ adjust"))
 
 	content := strings.Join(lines, "\n")
 	return s.ViewportFocusedStyle.Width(width).Height(height).Render(content)

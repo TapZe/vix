@@ -168,6 +168,76 @@ func moveSessionToClosed(paths config.VixPaths, id string) error {
 	return os.Rename(src, dst)
 }
 
+// deleteSessionRecord removes the record for id from both open/ and closed/.
+// Used when an empty conversation is closed: there is nothing worth archiving,
+// so the record is deleted instead of moved to closed/. A no-op when
+// persistence is disabled or the files do not exist.
+func deleteSessionRecord(paths config.VixPaths, id string) error {
+	for _, dir := range []string{paths.SessionsOpen(), paths.SessionsClosed()} {
+		p := sessionRecordPath(dir, id)
+		if p == "" {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// trimStaleClosedSessions deletes closed session records whose last activity
+// is older than maxAge. Last activity is the record's LastRequestAt, else
+// StartedAt; unparsable/corrupt files fall back to their mtime so they don't
+// accumulate forever. A no-op when maxAge <= 0 (retention disabled, the
+// "never" setting) or persistence is unavailable. Run once at daemon startup.
+func trimStaleClosedSessions(paths config.VixPaths, maxAge time.Duration) {
+	if maxAge <= 0 {
+		return
+	}
+	dir := paths.SessionsClosed()
+	if dir == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	trimmed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		var last time.Time
+		data, err := os.ReadFile(p)
+		if err == nil {
+			var rec sessionRecord
+			if json.Unmarshal(data, &rec) == nil {
+				last = rec.lastActivity()
+			}
+		}
+		if last.IsZero() {
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			last = info.ModTime()
+		}
+		if last.After(cutoff) {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			LogError("trim closed session %s: %v", e.Name(), err)
+			continue
+		}
+		trimmed++
+	}
+	if trimmed > 0 {
+		LogInfo("trimmed %d stale closed session(s) older than %s", trimmed, maxAge)
+	}
+}
+
 // lastActivity returns the timestamp used to order the open list: the last
 // request time if present, else the start time.
 func (r sessionRecord) lastActivity() time.Time {

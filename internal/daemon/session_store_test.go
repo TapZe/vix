@@ -311,3 +311,132 @@ func TestEmitReplayWorkflowPresentKept(t *testing.T) {
 		t.Errorf("warnings = %v, want none", rep.Warnings)
 	}
 }
+
+func TestDeleteSessionRecord(t *testing.T) {
+	paths := testPaths(t)
+
+	// Record in open/ is removed.
+	open := sampleRecord()
+	open.ID = "del-open"
+	if err := saveSessionRecord(paths, open); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := deleteSessionRecord(paths, open.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := os.Stat(sessionRecordPath(paths.SessionsOpen(), open.ID)); !os.IsNotExist(err) {
+		t.Error("record still present in open/ after delete")
+	}
+
+	// Record in closed/ is removed too.
+	closed := sampleRecord()
+	closed.ID = "del-closed"
+	if err := saveSessionRecord(paths, closed); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := moveSessionToClosed(paths, closed.ID); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if err := deleteSessionRecord(paths, closed.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := os.Stat(sessionRecordPath(paths.SessionsClosed(), closed.ID)); !os.IsNotExist(err) {
+		t.Error("record still present in closed/ after delete")
+	}
+
+	// Missing record and disabled persistence are no-ops.
+	if err := deleteSessionRecord(paths, "no-such-id"); err != nil {
+		t.Errorf("delete missing: %v", err)
+	}
+	if err := deleteSessionRecord(config.NewVixPaths("", "", "/work"), "x"); err != nil {
+		t.Errorf("delete with persistence disabled: %v", err)
+	}
+}
+
+// writeClosedRecord saves rec and moves it to closed/, returning its path.
+func writeClosedRecord(t *testing.T, paths config.VixPaths, rec sessionRecord) string {
+	t.Helper()
+	if err := saveSessionRecord(paths, rec); err != nil {
+		t.Fatalf("save %s: %v", rec.ID, err)
+	}
+	if err := moveSessionToClosed(paths, rec.ID); err != nil {
+		t.Fatalf("move %s: %v", rec.ID, err)
+	}
+	return sessionRecordPath(paths.SessionsClosed(), rec.ID)
+}
+
+func TestTrimStaleClosedSessions(t *testing.T) {
+	paths := testPaths(t)
+	week := 7 * 24 * time.Hour
+
+	fresh := sampleRecord()
+	fresh.ID = "fresh"
+	fresh.LastRequestAt = time.Now().Add(-time.Hour)
+	freshPath := writeClosedRecord(t, paths, fresh)
+
+	stale := sampleRecord()
+	stale.ID = "stale"
+	stale.LastRequestAt = time.Now().Add(-2 * week)
+	stalePath := writeClosedRecord(t, paths, stale)
+
+	// Stale via StartedAt only (no LastRequestAt).
+	staleStart := sampleRecord()
+	staleStart.ID = "stale-start"
+	staleStart.StartedAt = time.Now().Add(-2 * week)
+	staleStart.LastRequestAt = time.Time{}
+	staleStartPath := writeClosedRecord(t, paths, staleStart)
+
+	// Corrupt file with an old mtime falls back to mtime and is trimmed.
+	corruptOld := filepath.Join(paths.SessionsClosed(), "corrupt-old.json")
+	if err := os.WriteFile(corruptOld, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * week)
+	if err := os.Chtimes(corruptOld, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt file with a fresh mtime is kept.
+	corruptFresh := filepath.Join(paths.SessionsClosed(), "corrupt-fresh.json")
+	if err := os.WriteFile(corruptFresh, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stale record still in open/ must not be touched.
+	openStale := sampleRecord()
+	openStale.ID = "open-stale"
+	openStale.LastRequestAt = time.Now().Add(-2 * week)
+	if err := saveSessionRecord(paths, openStale); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	trimStaleClosedSessions(paths, week)
+
+	for _, p := range []string{stalePath, staleStartPath, corruptOld} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s should have been trimmed", filepath.Base(p))
+		}
+	}
+	for _, p := range []string{freshPath, corruptFresh, sessionRecordPath(paths.SessionsOpen(), openStale.ID)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s should have been kept: %v", filepath.Base(p), err)
+		}
+	}
+}
+
+func TestTrimStaleClosedSessionsNever(t *testing.T) {
+	paths := testPaths(t)
+
+	stale := sampleRecord()
+	stale.ID = "stale"
+	stale.LastRequestAt = time.Now().Add(-365 * 24 * time.Hour)
+	p := writeClosedRecord(t, paths, stale)
+
+	// maxAge <= 0 means retention disabled ("never"): nothing is removed.
+	trimStaleClosedSessions(paths, 0)
+	trimStaleClosedSessions(paths, -time.Hour)
+
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("record should have been kept with retention disabled: %v", err)
+	}
+}
