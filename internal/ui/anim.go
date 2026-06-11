@@ -12,10 +12,9 @@ import (
 
 const (
 	// animFPS sets the thinking spinner cadence. Every tick re-runs the full
-	// Model.View, so this directly multiplies render cost; 12fps reads as
-	// smooth (same rationale as sessionsSpinnerPeriod below) and is 2.5x
-	// cheaper than the previous 30fps.
-	animFPS      = 12
+	// Model.View, so this directly multiplies render cost; 30fps for a fluid
+	// spinner.
+	animFPS      = 30
 	animNumChars = 12
 )
 
