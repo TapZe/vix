@@ -113,6 +113,14 @@ does not reliably show the host process that launched the session, even though i
   the TUI for a VHS recording), prefer an explicit, isolated instance (e.g. a
   separate `--config-dir` and socket path) rather than touching the default one.
 
+## Consent before implementation
+
+**Always ask for explicit user consent before writing or modifying any code.** When a user describes a problem, asks a question, or discusses a potential change, treat it as a conversation — not a request to implement. Present your understanding of the problem and your proposed approach, then wait for the user to confirm they want you to proceed.
+
+- If the user says "how would you fix X?" or "what do you think about Y?", respond with an explanation or plan, not with code changes.
+- If the intent is ambiguous, ask: "Would you like me to implement this?" before touching any files.
+- Only skip this step when the user's message unambiguously requests implementation (e.g. "fix this", "implement that", "make it so").
+
 ## Key Conventions
 
 - **Go style** - follow standard Go conventions, use `gofmt`.
