@@ -42,12 +42,12 @@ type Server struct {
 	sessionID string  // Unique ID for this daemon session
 
 	// Agent session support
-	cred         config.Credential
-	model        string
-	pluginConfig PluginConfig
-	sessions     map[string]*Session
-	sessionMu    sync.Mutex
-	serverCtx    context.Context
+	cred      config.Credential
+	model     string
+	plugins   PluginSource
+	sessions  map[string]*Session
+	sessionMu sync.Mutex
+	serverCtx context.Context
 
 	// User-level config directory (~/.vix/)
 	homeVixDir string
@@ -147,17 +147,17 @@ func (s *Server) QuitAll() {
 }
 
 // NewServer creates a new daemon server.
-func NewServer(sockPath string, cred config.Credential, sessionID, model string, daemonConfig *config.DaemonConfig, pluginCfg PluginConfig) *Server {
+func NewServer(sockPath string, cred config.Credential, sessionID, model string, daemonConfig *config.DaemonConfig, plugins PluginSource) *Server {
 	s := &Server{
-		handlers:     make(map[string]HandlerFunc),
-		sockPath:     sockPath,
-		sessionID:    sessionID,
-		cred:         cred,
-		model:        model,
-		pluginConfig: pluginCfg,
-		sessions:     make(map[string]*Session),
-		homeVixDir:   daemonConfig.HomeVixDir,
-		authToken:    daemonConfig.AuthToken,
+		handlers:   make(map[string]HandlerFunc),
+		sockPath:   sockPath,
+		sessionID:  sessionID,
+		cred:       cred,
+		model:      model,
+		plugins:    plugins,
+		sessions:   make(map[string]*Session),
+		homeVixDir: daemonConfig.HomeVixDir,
+		authToken:  daemonConfig.AuthToken,
 	}
 
 	// Set LLM log directory to ~/.vix/logs/

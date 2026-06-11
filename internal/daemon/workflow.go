@@ -796,21 +796,12 @@ func envVars(cwd, model string) map[string]string {
 // toolTimeouts carries the parent session's tool_timeouts bounds so the
 // runner's tool dispatches honour the same settings.json floor/cap.
 func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, cwd string, toolTimeouts ToolTimeouts, searchDirs ...string) (*AgentRunner, error) {
-	model := config.Model
-	if model == "" {
-		model = parentModel
-	}
-
 	maxTurns := config.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 20
 	}
 
-	effort := config.Effort
-	if effort == "" {
-		effort = llm.DefaultEffortFromSpec(model)
-	}
-	client, err := llm.NewFromModel(model, PluginConfig{}, effort, int64(config.MaxTokens))
+	client, model, err := buildRunnerClient(config.Model, config.Effort, parentModel, int64(config.MaxTokens))
 	if err != nil {
 		return nil, fmt.Errorf("cannot build agent runner: %w", err)
 	}
@@ -846,7 +837,7 @@ func (a *AgentRunner) Clone(cred config.Credential) (*AgentRunner, error) {
 	copy(tools, a.Tools)
 
 	cloneSpec := llm.Spec(a.LLM) // e.g. "openai/gpt-5.1"
-	clonedClient, err := llm.NewFromModel(cloneSpec, PluginConfig{}, a.LLM.Effort(), a.LLM.MaxTokens())
+	clonedClient, err := llm.NewFromModel(cloneSpec, nil, a.LLM.Effort(), a.LLM.MaxTokens())
 	if err != nil {
 		return nil, fmt.Errorf("cannot clone agent runner: %w", err)
 	}

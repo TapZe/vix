@@ -478,7 +478,7 @@ func TestUnreadRoundTrip(t *testing.T) {
 // the mark_read transition persists.
 func TestMarkReadCommandClearsUnread(t *testing.T) {
 	paths := testPaths(t)
-	srv := NewServer("/tmp/unused.sock", config.Credential{}, "t", "m", &config.DaemonConfig{}, PluginConfig{})
+	srv := NewServer("/tmp/unused.sock", config.Credential{}, "t", "m", &config.DaemonConfig{}, nil)
 	sess := NewSession("sess-mr", srv, nil, "m", "/work", paths.Override(), false, true, true, true, context.Background())
 
 	sess.unread = true

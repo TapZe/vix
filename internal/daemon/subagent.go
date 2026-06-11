@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -76,6 +77,33 @@ func nextTaskID() string {
 	return fmt.Sprintf("task_%d", taskCounter.Add(1))
 }
 
+// buildRunnerClient constructs the LLM client for a workflow step or subagent.
+// cfgModel/cfgEffort come from the agent definition; an empty model inherits
+// parentModel (the parent session's model). When the configured model's
+// provider has no credential — e.g. a shipped or stale agent file pins a
+// provider the user never set up — it falls back to parentModel instead of
+// failing the whole run. Returns the client and the model spec actually used.
+func buildRunnerClient(cfgModel, cfgEffort, parentModel string, maxTokens int64) (LLM, string, error) {
+	model := cfgModel
+	if model == "" {
+		model = parentModel
+	}
+	effort := cfgEffort
+	if effort == "" {
+		effort = llm.DefaultEffortFromSpec(model)
+	}
+	client, err := llm.NewFromModel(model, nil, effort, maxTokens)
+	if err != nil && errors.Is(err, llm.ErrNoCredential) && parentModel != "" && model != parentModel {
+		log.Printf("[agent] model %s unusable (%v) — falling back to session model %s", model, err, parentModel)
+		model = parentModel
+		if cfgEffort == "" {
+			effort = llm.DefaultEffortFromSpec(model)
+		}
+		client, err = llm.NewFromModel(model, nil, effort, maxTokens)
+	}
+	return client, model, err
+}
+
 // RunSubagent executes a subagent with its own conversation, tools, and LLM instance.
 // It blocks until the subagent completes or the context is cancelled.
 // executeTool is called directly (in-process, no socket round-trip).
@@ -99,21 +127,12 @@ func RunSubagent(
 	toolTimeoutMax time.Duration,
 	searchDirs ...string,
 ) (*SubagentResult, error) {
-	model := config.Model
-	if model == "" {
-		model = parentModel
-	}
-
 	maxTurns := config.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 20
 	}
 
-	effort := config.Effort
-	if effort == "" {
-		effort = llm.DefaultEffortFromSpec(model)
-	}
-	client, err := llm.NewFromModel(model, PluginConfig{}, effort, int64(config.MaxTokens))
+	client, model, err := buildRunnerClient(config.Model, config.Effort, parentModel, int64(config.MaxTokens))
 	if err != nil {
 		return nil, fmt.Errorf("cannot run subagent: %w", err)
 	}

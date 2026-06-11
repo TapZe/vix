@@ -644,7 +644,7 @@ func (s *Session) Run() {
 // unconfigured state; set_model keeps the prior working client). It never
 // fabricates a client, so a missing credential can't leak into an LLM request.
 func (s *Session) applyModel(spec string, maxTokens int64) error {
-	client, err := llm.NewFromModel(spec, s.server.pluginConfig, llm.DefaultEffortFromSpec(spec), maxTokens)
+	client, err := llm.NewFromModel(spec, s.server.plugins, llm.DefaultEffortFromSpec(spec), maxTokens)
 	if err != nil {
 		return err
 	}

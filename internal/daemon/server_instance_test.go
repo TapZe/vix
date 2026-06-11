@@ -20,7 +20,7 @@ func newInstanceTestServer(t *testing.T) *Server {
 	t.Helper()
 	sock := filepath.Join("/tmp", fmt.Sprintf("vixd-inst-%d.sock", time.Now().UnixNano()))
 	t.Cleanup(func() { os.Remove(sock) })
-	return NewServer(sock, config.Credential{}, "test-session", "test-model", &config.DaemonConfig{}, PluginConfig{})
+	return NewServer(sock, config.Credential{}, "test-session", "test-model", &config.DaemonConfig{}, nil)
 }
 
 // serve starts the server in a goroutine and waits until it is accepting

@@ -159,9 +159,9 @@ func main() {
 	if err := providers.Configure(pluginPaths.Providers()); err != nil {
 		log.Printf("[providers] using embedded defaults: %v", err)
 	}
-	pluginCfg := daemon.LoadPlugins(pluginPaths.Plugins(), Version, model)
+	pluginSrc := daemon.NewPluginSource(pluginPaths.Plugins(), Version)
 
-	server := daemon.NewServer(*socketPathFlag, cred, sessionID, model, daemonConfig, pluginCfg)
+	server := daemon.NewServer(*socketPathFlag, cred, sessionID, model, daemonConfig, pluginSrc)
 	server.SetVersion(Version)
 	if config.JobsEnabled() {
 		server.EnableJobScheduler()
