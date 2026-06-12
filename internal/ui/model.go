@@ -290,6 +290,9 @@ type Model struct {
 	quitCloseAll         bool // quit-dialog checkbox: close all sessions on quit
 	sessionCloseIdx      int
 	sessionCloseSelected int
+	// vixDismissID, when non-empty, marks that the close dialog targets a
+	// persisted vix-initiated record (dismissed, not closed) with that ID.
+	vixDismissID string
 
 	// Sessions tab UI
 	sessionsSelected int
@@ -594,40 +597,16 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// --- Global workspace shortcuts ---
 		switch msg.String() {
 		case "ctrl+n":
-			if m.selectedSession < len(m.sessions)-1 {
-				m.selectedSession++
-				m.activeTab = TabKindChat
-				selSess := m.sessions[m.selectedSession]
-				m.markSessionRead(selSess)
-				selSess.input.SetWidth(m.width - 4)
-				if selSess.client == nil && !selSess.reconnecting {
-					selSess.reconnecting = true
-					cmds = append(cmds, attemptReconnect(m.socketPath, m.cwd, m.cfg.ConfigDir, m.cfg.Model, m.authToken, false, m.enableAutomaticWritePermission, m.enableAutomaticDirectoryAccess, selSess.daemonSessionID))
-				}
-				cmds = append(cmds, selSess.thinkingAnim.Resume())
-				if !m.hasAlertSessions() {
-					m.stopTabAlertBlink()
-				}
+			if stepCmds, ok := m.stepWorkspaceSession(1); ok {
+				cmds = append(cmds, stepCmds...)
 			} else if curSess := m.currentSession(); curSess != nil {
 				return m, m.emitStatusMsg("No next session", StatusMsgWarning)
 			}
 			return m, tea.Batch(cmds...)
 
 		case "ctrl+p":
-			if m.selectedSession > 0 {
-				m.selectedSession--
-				m.activeTab = TabKindChat
-				selSess := m.sessions[m.selectedSession]
-				m.markSessionRead(selSess)
-				selSess.input.SetWidth(m.width - 4)
-				if selSess.client == nil && !selSess.reconnecting {
-					selSess.reconnecting = true
-					cmds = append(cmds, attemptReconnect(m.socketPath, m.cwd, m.cfg.ConfigDir, m.cfg.Model, m.authToken, false, m.enableAutomaticWritePermission, m.enableAutomaticDirectoryAccess, selSess.daemonSessionID))
-				}
-				cmds = append(cmds, selSess.thinkingAnim.Resume())
-				if !m.hasAlertSessions() {
-					m.stopTabAlertBlink()
-				}
+			if stepCmds, ok := m.stepWorkspaceSession(-1); ok {
+				cmds = append(cmds, stepCmds...)
 			} else if curSess := m.currentSession(); curSess != nil {
 				return m, m.emitStatusMsg("No previous session", StatusMsgWarning)
 			}
@@ -716,8 +695,12 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return nm, c
 			case "x":
 				if sum, ok := m.vixSelectedSummary(); ok {
-					// Dismiss a vix-initiated record without opening it.
-					return m, dismissVixSession(m.socketPath, m.cwd, m.cfg.ConfigDir, m.authToken, sum.ID)
+					// Dismiss a vix-initiated record: same confirmation dialog
+					// as closing a live session.
+					m.vixDismissID = sum.ID
+					m.sessionCloseSelected = 1 // default No
+					m.state = StateSessionCloseConfirm
+					return m, nil
 				}
 				if idx, ok := m.sessionsSelectedIdx(); ok {
 					m.sessionCloseIdx = idx
@@ -1469,10 +1452,17 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// hasUnreadSessions reports whether any session still has unread agent activity.
+// hasUnreadSessions reports whether any unread conversation remains: a live
+// session with unread agent activity, or a persisted vix-initiated record
+// still flagged unread.
 func (m *Model) hasUnreadSessions() bool {
 	for _, s := range m.sessions {
 		if s.unreadCount > 0 {
+			return true
+		}
+	}
+	for _, sum := range m.vixSessions {
+		if sum.Unread {
 			return true
 		}
 	}
@@ -2090,8 +2080,9 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.state = StateWaitingForInput
 		} else {
 			if m.sessionCloseSelected == 0 {
-				return m.doCloseSession(m.sessionCloseIdx)
+				return m.confirmSessionClose()
 			}
+			m.vixDismissID = ""
 			m.state = StateWaitingForInput
 		}
 	case "space", " ":
@@ -2105,12 +2096,26 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		if m.state == StateSessionCloseConfirm {
-			return m.doCloseSession(m.sessionCloseIdx)
+			return m.confirmSessionClose()
 		}
 	case "n", "N", "esc":
+		m.vixDismissID = ""
 		m.state = StateWaitingForInput
 	}
 	return m, nil
+}
+
+// confirmSessionClose runs the action behind the close-confirmation dialog:
+// dismissing a persisted vix-initiated record, or closing the live session at
+// sessionCloseIdx.
+func (m Model) confirmSessionClose() (tea.Model, tea.Cmd) {
+	if m.vixDismissID != "" {
+		id := m.vixDismissID
+		m.vixDismissID = ""
+		m.state = StateWaitingForInput
+		return m, dismissVixSession(m.socketPath, m.cwd, m.cfg.ConfigDir, m.authToken, id)
+	}
+	return m.doCloseSession(m.sessionCloseIdx)
 }
 
 // handleTrimKey handles keys for the per-session trim confirm dialog.
@@ -2983,8 +2988,8 @@ func (m Model) View() tea.View {
 
 	// Session close confirm overlay
 	if m.state == StateSessionCloseConfirm {
-		sessionID := ""
-		if m.sessionCloseIdx >= 0 && m.sessionCloseIdx < len(m.sessions) {
+		sessionID := m.vixDismissID
+		if sessionID == "" && m.sessionCloseIdx >= 0 && m.sessionCloseIdx < len(m.sessions) {
 			if s := m.sessions[m.sessionCloseIdx]; s.client != nil {
 				sessionID = s.client.SessionID()
 			}
@@ -3703,6 +3708,53 @@ func (m *Model) visibleSessionIndices() []int {
 		}
 	}
 	return append(user, vix...)
+}
+
+// stepWorkspaceSession moves the workspace to the next (dir > 0) or previous
+// (dir < 0) session in Sessions-tab display order (user-initiated first, then
+// vix-initiated) — which can differ from m.sessions slice order, since
+// attached sessions are inserted by creation time. Reports false when there is
+// no session in that direction.
+func (m *Model) stepWorkspaceSession(dir int) ([]tea.Cmd, bool) {
+	order := m.visibleSessionIndices()
+	pos := -1
+	for i, idx := range order {
+		if idx == m.selectedSession {
+			pos = i
+			break
+		}
+	}
+	next := pos + dir
+	if pos < 0 || next < 0 {
+		return nil, false
+	}
+	if next >= len(order) {
+		// Past the last live session: the rows below are the persisted,
+		// not-yet-attached vix-initiated records. Attach the first one — same
+		// as pressing enter on it in the Sessions tab; the replay's
+		// sessionRestoredMsg focuses it and marks it read.
+		if len(m.vixSessions) > 0 {
+			sum := m.vixSessions[0]
+			m.focusRestoredID = sum.ID
+			return []tea.Cmd{attachRestoreSession(m.socketPath, m.cwd, m.cfg.ConfigDir, m.cfg.Model, m.authToken, m.enableAutomaticWritePermission, m.enableAutomaticDirectoryAccess, sum)}, true
+		}
+		return nil, false
+	}
+	var cmds []tea.Cmd
+	m.selectedSession = order[next]
+	m.activeTab = TabKindChat
+	selSess := m.sessions[m.selectedSession]
+	m.markSessionRead(selSess)
+	selSess.input.SetWidth(m.width - 4)
+	if selSess.client == nil && !selSess.reconnecting {
+		selSess.reconnecting = true
+		cmds = append(cmds, attemptReconnect(m.socketPath, m.cwd, m.cfg.ConfigDir, m.cfg.Model, m.authToken, false, m.enableAutomaticWritePermission, m.enableAutomaticDirectoryAccess, selSess.daemonSessionID))
+	}
+	cmds = append(cmds, selSess.thinkingAnim.Resume())
+	if !m.hasAlertSessions() {
+		m.stopTabAlertBlink()
+	}
+	return cmds, true
 }
 
 // sessionsVisibleCount returns the number of visible sessions (after filter).
