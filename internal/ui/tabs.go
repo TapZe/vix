@@ -41,6 +41,11 @@ func formatRunningTime(d time.Duration) string {
 // waitingBadge is the "Waiting for input" styled tag shown on sessions that need user attention.
 var waitingBadge = lipgloss.NewStyle().Background(colorSecondary).Foreground(lipgloss.Color("0")).Bold(true).Render(" Waiting for input ")
 
+// sessionGroupHeaderStyle styles the "User-initiated" / "Vix-initiated" group
+// headers in the Sessions tab: dark text on a blue background, matching the
+// question panel's tab label.
+var sessionGroupHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(colorStructural)
+
 // unreadDotStyle styles the ● indicator for sessions with unread messages.
 var unreadDotStyle = lipgloss.NewStyle().Foreground(colorSecondary)
 
@@ -80,6 +85,10 @@ func renderSessionsView(userSessions, vixLive []*SessionState, vixSessions []pro
 	rows := []string{s.TabActiveStyle.Render(header)}
 
 	rowIdx := 0
+
+	if len(userSessions) > 0 {
+		rows = append(rows, "", "  "+sessionGroupHeaderStyle.Render(" User-initiated "))
+	}
 
 	for _, sess := range userSessions {
 		sessionCol := "connecting…"
@@ -177,7 +186,7 @@ func renderSessionsView(userSessions, vixLive []*SessionState, vixSessions []pro
 	// as chat tabs), then persisted job runs and alerts, openable (enter) or
 	// dismissable (x) without being live sessions.
 	if len(vixLive)+len(vixSessions) > 0 {
-		rows = append(rows, "", s.TabActiveStyle.Render("  Vix-initiated"))
+		rows = append(rows, "", "  "+sessionGroupHeaderStyle.Render(" Vix-initiated "))
 
 		// vixCols formats the three shared columns of a vix-initiated row from
 		// its record summary (id, "<job> · <status>  <first message>", ran ago).
