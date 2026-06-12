@@ -444,6 +444,7 @@ func (s *Session) seedFromRecord(rec *sessionRecord) {
 	s.forkTurnIdx = rec.ForkTurnIdx
 	s.origin = rec.Origin
 	s.trigger = rec.Trigger
+	s.jobStatus = rec.JobStatus
 	s.unread = rec.Unread
 	s.sessionMode = rec.SessionMode
 	if s.sessionMode == "" {

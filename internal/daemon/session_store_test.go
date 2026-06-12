@@ -119,6 +119,62 @@ func TestMoveToClosed(t *testing.T) {
 	}
 }
 
+// TestSessionListVixOriginIgnoresCWDFilter: session.list scopes user sessions
+// to the requesting cwd, but vix-initiated records (job runs, alerts) run from
+// the job's cwd and must surface in every instance regardless of where the TUI
+// was launched.
+func TestSessionListVixOriginIgnoresCWDFilter(t *testing.T) {
+	dir := t.TempDir()
+	paths := config.NewVixPaths(dir, "", "/work")
+
+	userSame := sampleRecord()
+	userSame.ID = "user-same-cwd"
+	userSame.CWD = "/work"
+
+	userOther := sampleRecord()
+	userOther.ID = "user-other-cwd"
+	userOther.CWD = "/elsewhere"
+
+	vixRun := sampleRecord()
+	vixRun.ID = "vix-run"
+	vixRun.CWD = "/elsewhere" // the job's cwd, not the TUI's
+	vixRun.Origin = "vix"
+	vixRun.Trigger = &protocol.TriggerInfo{Type: "cron", Ref: "job-1"}
+
+	for _, r := range []sessionRecord{userSame, userOther, vixRun} {
+		if err := saveSessionRecord(paths, r); err != nil {
+			t.Fatalf("save %s: %v", r.ID, err)
+		}
+	}
+
+	srv := newInstanceTestServer(t)
+	RegisterBuiltinHandlers(srv)
+	resp, err := srv.GetHandler("session.list")(map[string]any{
+		"cwd": "/work", "config_dir": dir,
+	})
+	if err != nil {
+		t.Fatalf("session.list: %v", err)
+	}
+	sums, ok := resp["sessions"].([]protocol.SessionSummary)
+	if !ok {
+		t.Fatalf("sessions has unexpected type %T", resp["sessions"])
+	}
+
+	got := map[string]bool{}
+	for _, s := range sums {
+		got[s.ID] = true
+	}
+	if !got["user-same-cwd"] {
+		t.Error("user session for the requesting cwd missing")
+	}
+	if got["user-other-cwd"] {
+		t.Error("user session for another cwd leaked through the filter")
+	}
+	if !got["vix-run"] {
+		t.Error("vix-initiated session filtered out despite global visibility")
+	}
+}
+
 func TestListOpenExcludesClosed(t *testing.T) {
 	paths := testPaths(t)
 

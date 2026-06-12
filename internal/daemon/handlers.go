@@ -64,7 +64,10 @@ func RegisterBuiltinHandlers(s *Server) {
 		recs := listOpenSessionRecords(paths)
 		summaries := make([]protocol.SessionSummary, 0, len(recs))
 		for _, r := range recs {
-			if cwd != "" && r.CWD != cwd {
+			// Vix-initiated records (job runs, alerts) are global: they run
+			// from the job's cwd, not the TUI's, and must surface in every
+			// instance regardless of where it was launched.
+			if cwd != "" && r.CWD != cwd && r.Origin != "vix" {
 				continue
 			}
 			sum := r.summary()
