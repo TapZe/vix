@@ -2619,7 +2619,7 @@ func (s *Session) handleSpawnAgent(ctx context.Context, input map[string]any) (s
 			return s.executeToolConfirmed(bgCtx, name, params), nil
 		}
 		bgDef, bgMax := s.toolTimeoutBounds()
-		taskID := s.backgroundTasks.SpawnBackground(bgCtx, config, prompt, cred, parentModel, bgExecuteTool, s.cwd, bgDef, bgMax, s.searchDirsSlice()...)
+		taskID := s.backgroundTasks.SpawnBackground(bgCtx, config, prompt, cred, parentModel, s.server.plugins, bgExecuteTool, s.cwd, bgDef, bgMax, s.searchDirsSlice()...)
 		s.emit("event.tool_result", protocol.EventToolResult{
 			Name:   "spawn_agent",
 			Output: fmt.Sprintf("Background task started. Task ID: %s", taskID),
@@ -2634,7 +2634,7 @@ func (s *Session) handleSpawnAgent(ctx context.Context, input map[string]any) (s
 	}
 	log.Printf("[subagent] spawning foreground agent (type=%s)", config.Name)
 	def, maxv := s.toolTimeoutBounds()
-	result, err := RunSubagent(ctx, config, prompt, cred, parentModel, executeTool, s.cwd, s.emitHooks(), def, maxv, s.searchDirsSlice()...)
+	result, err := RunSubagent(ctx, config, prompt, cred, parentModel, s.server.plugins, executeTool, s.cwd, s.emitHooks(), def, maxv, s.searchDirsSlice()...)
 
 	if err != nil {
 		return fmt.Sprintf("Subagent error: %v", err), true
@@ -2656,7 +2656,7 @@ func (s *Session) RunExploration(ctx context.Context, agentName, prompt string) 
 		return s.executeToolConfirmed(ctx, name, params), nil
 	}
 	def, maxv := s.toolTimeoutBounds()
-	return RunSubagent(ctx, config, prompt, s.llm.Credential(), s.model, executeTool, s.cwd, nil, def, maxv, s.searchDirsSlice()...)
+	return RunSubagent(ctx, config, prompt, s.llm.Credential(), s.model, s.server.plugins, executeTool, s.cwd, nil, def, maxv, s.searchDirsSlice()...)
 }
 
 func (s *Session) handleTaskOutput(ctx context.Context, input map[string]any) (string, bool) {

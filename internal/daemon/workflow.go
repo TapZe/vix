@@ -122,6 +122,10 @@ type AgentRunner struct {
 	// fall back to package defaults in the dispatcher.
 	ToolTimeouts ToolTimeouts
 
+	// plugins is the daemon's plugin source, kept so Clone rebuilds its client
+	// with the same request overrides as the original runner.
+	plugins PluginSource
+
 	// Per-Send() accumulated usage (reset at start of each Send call)
 	LastInputTokens         int64
 	LastOutputTokens        int64
@@ -795,13 +799,13 @@ func envVars(cwd, model string) map[string]string {
 // prompt includes from, in precedence order (highest first).
 // toolTimeouts carries the parent session's tool_timeouts bounds so the
 // runner's tool dispatches honour the same settings.json floor/cap.
-func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, cwd string, toolTimeouts ToolTimeouts, searchDirs ...string) (*AgentRunner, error) {
+func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, cwd string, plugins PluginSource, toolTimeouts ToolTimeouts, searchDirs ...string) (*AgentRunner, error) {
 	maxTurns := config.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 20
 	}
 
-	client, model, err := buildRunnerClient(config.Model, config.Effort, parentModel, int64(config.MaxTokens))
+	client, model, err := buildRunnerClient(config.Model, config.Effort, parentModel, plugins, int64(config.MaxTokens))
 	if err != nil {
 		return nil, fmt.Errorf("cannot build agent runner: %w", err)
 	}
@@ -822,6 +826,7 @@ func NewAgentRunner(config SubagentConfig, cred config.Credential, parentModel, 
 		Tools:        tools,
 		MaxTurns:     maxTurns,
 		ToolTimeouts: toolTimeouts,
+		plugins:      plugins,
 	}, nil
 }
 
@@ -837,7 +842,7 @@ func (a *AgentRunner) Clone(cred config.Credential) (*AgentRunner, error) {
 	copy(tools, a.Tools)
 
 	cloneSpec := llm.Spec(a.LLM) // e.g. "openai/gpt-5.1"
-	clonedClient, err := llm.NewFromModel(cloneSpec, nil, a.LLM.Effort(), a.LLM.MaxTokens())
+	clonedClient, err := llm.NewFromModel(cloneSpec, a.plugins, a.LLM.Effort(), a.LLM.MaxTokens())
 	if err != nil {
 		return nil, fmt.Errorf("cannot clone agent runner: %w", err)
 	}
@@ -850,6 +855,7 @@ func (a *AgentRunner) Clone(cred config.Credential) (*AgentRunner, error) {
 		Tools:        tools,
 		MaxTurns:     a.MaxTurns,
 		ToolTimeouts: a.ToolTimeouts,
+		plugins:      a.plugins,
 	}, nil
 }
 
@@ -1478,7 +1484,7 @@ func (s *Session) executeParallelSteps(
 					if step.Effort != "" {
 						config.Effort = step.Effort
 					}
-					ar, err := NewAgentRunner(config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+					ar, err := NewAgentRunner(config, cred, parentModel, s.cwd, s.server.plugins, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
 					if err != nil {
 						errs[idx] = fmt.Errorf("step '%s': %w", stepID, err)
 						return
@@ -1695,7 +1701,7 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 			if !ok {
 				continue
 			}
-			ar, err := NewAgentRunner(snap.Config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+			ar, err := NewAgentRunner(snap.Config, cred, parentModel, s.cwd, s.server.plugins, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
 			if err != nil {
 				LogError("[workflow] resume: cannot rebuild agent for step '%s': %v", id, err)
 				continue
@@ -2160,7 +2166,7 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 				if step.Effort != "" {
 					config.Effort = step.Effort
 				}
-				ar, err := NewAgentRunner(config, cred, parentModel, s.cwd, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
+				ar, err := NewAgentRunner(config, cred, parentModel, s.cwd, s.server.plugins, s.projectConfig.ToolTimeouts, s.searchDirsSlice()...)
 				if err != nil {
 					s.activePlan = nil
 					s.emit("event.workflow_complete", protocol.EventWorkflowComplete{

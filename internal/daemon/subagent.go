@@ -79,11 +79,13 @@ func nextTaskID() string {
 
 // buildRunnerClient constructs the LLM client for a workflow step or subagent.
 // cfgModel/cfgEffort come from the agent definition; an empty model inherits
-// parentModel (the parent session's model). When the configured model's
+// parentModel (the parent session's model). plugins is the daemon's plugin
+// source so runner clients get the same request overrides (headers, system
+// prefix) as session-level clients. When the configured model's
 // provider has no credential — e.g. a shipped or stale agent file pins a
 // provider the user never set up — it falls back to parentModel instead of
 // failing the whole run. Returns the client and the model spec actually used.
-func buildRunnerClient(cfgModel, cfgEffort, parentModel string, maxTokens int64) (LLM, string, error) {
+func buildRunnerClient(cfgModel, cfgEffort, parentModel string, plugins PluginSource, maxTokens int64) (LLM, string, error) {
 	model := cfgModel
 	if model == "" {
 		model = parentModel
@@ -92,14 +94,14 @@ func buildRunnerClient(cfgModel, cfgEffort, parentModel string, maxTokens int64)
 	if effort == "" {
 		effort = llm.DefaultEffortFromSpec(model)
 	}
-	client, err := llm.NewFromModel(model, nil, effort, maxTokens)
+	client, err := llm.NewFromModel(model, plugins, effort, maxTokens)
 	if err != nil && errors.Is(err, llm.ErrNoCredential) && parentModel != "" && model != parentModel {
 		log.Printf("[agent] model %s unusable (%v) — falling back to session model %s", model, err, parentModel)
 		model = parentModel
 		if cfgEffort == "" {
 			effort = llm.DefaultEffortFromSpec(model)
 		}
-		client, err = llm.NewFromModel(model, nil, effort, maxTokens)
+		client, err = llm.NewFromModel(model, plugins, effort, maxTokens)
 	}
 	return client, model, err
 }
@@ -120,6 +122,7 @@ func RunSubagent(
 	prompt string,
 	cred vixconfig.Credential,
 	parentModel string,
+	plugins PluginSource,
 	executeTool func(name string, params map[string]any, cwd string) (*ToolResult, error),
 	cwd string,
 	hooks *TurnHooks,
@@ -132,7 +135,7 @@ func RunSubagent(
 		maxTurns = 20
 	}
 
-	client, model, err := buildRunnerClient(config.Model, config.Effort, parentModel, int64(config.MaxTokens))
+	client, model, err := buildRunnerClient(config.Model, config.Effort, parentModel, plugins, int64(config.MaxTokens))
 	if err != nil {
 		return nil, fmt.Errorf("cannot run subagent: %w", err)
 	}
@@ -436,6 +439,7 @@ func (r *BackgroundTaskRegistry) SpawnBackground(
 	prompt string,
 	cred vixconfig.Credential,
 	parentModel string,
+	plugins PluginSource,
 	executeTool func(name string, params map[string]any, cwd string) (*ToolResult, error),
 	cwd string,
 	toolTimeoutDefault time.Duration,
@@ -457,7 +461,7 @@ func (r *BackgroundTaskRegistry) SpawnBackground(
 		defer cancel()
 
 		t0 := time.Now()
-		result, err := RunSubagent(taskCtx, config, prompt, cred, parentModel, executeTool, cwd, nil, toolTimeoutDefault, toolTimeoutMax, searchDirs...)
+		result, err := RunSubagent(taskCtx, config, prompt, cred, parentModel, plugins, executeTool, cwd, nil, toolTimeoutDefault, toolTimeoutMax, searchDirs...)
 		elapsed := time.Since(t0)
 
 		if err != nil && result == nil {
