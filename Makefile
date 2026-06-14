@@ -1,4 +1,4 @@
-.PHONY: build build-web build-all pull push test release run-server run-ui patch-deps vendor-cgo-sources update-deps web-source
+.PHONY: build build-web build-all pull push test test-e2e test-e2e-sharded release run-server run-ui patch-deps vendor-cgo-sources update-deps web-source
 
 # The web UI source lives in a private submodule (internal/daemon/web/source).
 # It is only needed to *rebuild* the UI; the built output (internal/daemon/web/dist/)
@@ -137,6 +137,46 @@ update-deps:
 # Run the full test suite
 test:
 	go test ./...
+
+# Map the host arch to Go's GOARCH naming for the e2e container.
+E2E_ARCH := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+# Run the containerised end-to-end suite. PRE-RELEASE GATE — slow; runs the real
+# vix TUI + vixd against a mock LLM inside Docker, exercises the Landlock
+# sandbox, and writes an HTML report (e2e/out/report/index.html) + zip.
+# Requires Docker. See e2e/README.md.
+test-e2e:
+	./script/build.sh
+	./e2e/build-e2e.sh $(E2E_ARCH)
+	docker build -t vix-e2e -f e2e/Dockerfile --build-arg TARGETARCH=$(E2E_ARCH) .
+	mkdir -p e2e/out
+	docker run --rm --network none \
+	  --security-opt seccomp=e2e/seccomp-landlock.json \
+	  -v "$(CURDIR)/e2e/out:/out" vix-e2e
+	@echo "==> Report: e2e/out/report/index.html  (zip: e2e/out/e2e-report.zip)"
+
+# Sharded e2e run: fan the suite across SHARDS isolated containers in parallel,
+# each writing to e2e/out/shard-<k>/report, then merge + render + zip once on the
+# host. Usage: make test-e2e-sharded SHARDS=4
+SHARDS ?= 2
+test-e2e-sharded:
+	./script/build.sh
+	./e2e/build-e2e.sh $(E2E_ARCH)
+	docker build -t vix-e2e -f e2e/Dockerfile --build-arg TARGETARCH=$(E2E_ARCH) .
+	@rm -rf e2e/out/shard-* e2e/out/report e2e/out/e2e-report.zip
+	@for k in $$(seq 0 $$(($(SHARDS)-1))); do \
+	  mkdir -p e2e/out/shard-$$k; \
+	  echo "==> launching shard $$k/$(SHARDS)"; \
+	  docker run --rm --network none \
+	    --security-opt seccomp=e2e/seccomp-landlock.json \
+	    -e SHARD_INDEX=$$k -e SHARD_TOTAL=$(SHARDS) \
+	    -e VIX_E2E_REPORT=/out/shard-$$k/report \
+	    -v "$(CURDIR)/e2e/out:/out" vix-e2e & \
+	done; \
+	wait
+	cd e2e && go run ./cmd/report merge $(addprefix --in out/shard-,$(addsuffix /report,$(shell seq 0 $$(($(SHARDS)-1))))) --out out/report
+	cd e2e && go run ./cmd/report zip --in out/report --out out/e2e-report.zip
+	@echo "==> Merged report: e2e/out/report/index.html  (zip: e2e/out/e2e-report.zip)"
 
 # Publish a release. Usage: make release VERSION=v1.2.3
 # Build these versions: darwin-arm64 + linux-amd64 + linux-arm64, Docker for Linux
