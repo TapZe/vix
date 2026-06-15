@@ -1,0 +1,173 @@
+---
+name: hooks
+description: Create and manage lifecycle hooks that vixd fires automatically on agent-loop events (a tool about to run, a prompt submitted, a session starting, a turn finishing). Use when the user wants to enforce a rule, block or rewrite a tool call, validate prompts, auto-format, notify, or react to what the agent does.
+---
+
+# Lifecycle hooks
+
+vixd fires user-authored hooks on agent-loop events. Each hook is one JSON file
+in `~/.vix/hooks/`; the directory is hot-reloaded, so **creating a hook = writing
+a file with `write_file`**. There is no dedicated tool.
+
+A hook either runs **synchronously** and returns a decision that can veto or
+rewrite the triggering action (`"mode": "sync"`), or **asynchronously**,
+fire-and-forget, in an isolated session (`"mode": "async"`, the default).
+
+> Hooks are guardrails, not a security boundary. The hard boundary is the
+> `deny_list` + permission system, which runs *before* any hook. A blocking hook
+> can veto the common tool paths, but don't rely on it as airtight enforcement.
+
+## Hook spec — `~/.vix/hooks/<id>.json`
+
+```json
+{
+  "id": "block-env-writes",
+  "name": "Block .env writes",
+  "enabled": true,
+  "trigger": { "event": "PreToolUse", "matcher": "write_file|edit_file" },
+  "mode": "sync",
+  "blocking": true,
+  "command": "$(git rev-parse --show-toplevel)/.vix/hooks/block-env.sh",
+  "cwd": "",
+  "timeout": "5s",
+  "created_by": "agent:<your-session-id>"
+}
+```
+
+Exactly one of `command`, `workflow`, or `prompt` says what runs:
+
+- `command` — a shell command (run via `bash -c`). The fast, deterministic path;
+  recommended for sync/blocking hooks.
+- `workflow` — a workflow name (a single bash step works great for a fast veto).
+- `prompt` — a plain prompt evaluated by an LLM in an isolated session.
+
+### Events (`trigger.event`)
+
+| Event | When | Matcher filters | Can block |
+|-------|------|-----------------|-----------|
+| `PreToolUse` | before a tool runs | tool name | yes (deny / rewrite input) |
+| `PostToolUse` | after a tool completes | tool name | no (append context only) |
+| `UserPromptSubmit` | before a prompt enters the turn | — | yes (deny / rewrite prompt) |
+| `SessionStart` | when a session begins | source (`startup`/`resume`) | no |
+| `Stop` | when a turn finishes | — | no |
+
+`matcher` is a regex anchored to the whole field; `""` or `"*"` matches all.
+Examples: `bash`, `write_file|edit_file`, `mcp__.*`.
+
+### Modes & blocking
+
+- `mode: "async"` (default) — fire-and-forget; cannot block. Async
+  workflow/prompt hooks land in the Sessions tab under "Vix-initiated".
+- `mode: "sync"` — runs inline; the agent waits. Only sync hooks can return a
+  decision. Add `"blocking": true` to let a deny/modify actually take effect
+  (only valid for `PreToolUse` and `UserPromptSubmit`). A non-blocking sync hook
+  can still inject context but cannot veto.
+
+Sync hooks have a tight default timeout (5s; async 10m). A timed-out or broken
+command **fails open** (the action proceeds) so a bad hook never wedges the loop.
+
+## The decision contract
+
+**Command hooks** decide via exit code and stdout:
+
+- exit `0`, no output → allow
+- exit `0`, plain text → that text is injected as context for the model
+- exit `0`, JSON → an explicit decision (below)
+- exit `2` → deny; the reason is stderr (or stdout)
+- any other exit → allow (fail-open)
+
+JSON decision (stdout):
+
+```json
+{ "behavior": "deny",    "reason": "Destructive command blocked." }
+{ "behavior": "modify",  "input": { "path": "safe.txt" } }
+{ "behavior": "context", "context": "Note shown to the model." }
+{ "behavior": "allow" }
+```
+
+For `PreToolUse`, `modify.input` replaces the tool's arguments (the modified
+call is still checked against the deny_list). For `UserPromptSubmit`,
+`modify.input.prompt` rewrites the prompt text.
+
+**Workflow / prompt hooks** decide via their final text: a JSON object as above,
+or a line starting with `BLOCK: <reason>` to deny, otherwise the text becomes
+context.
+
+When several hooks match one event, the most restrictive wins
+(`deny > modify > context > allow`); context from every hook is concatenated.
+
+## Hook context (stdin / `$()`)
+
+Every hook receives a JSON envelope (command hooks: on stdin; workflow/prompt
+hooks: appended to the message). Use it to filter inside the hook body:
+
+```json
+{
+  "session_id": "...", "hook_event_name": "PreToolUse", "cwd": "/path",
+  "model": "anthropic/...", "permission_mode": "default", "origin": "user",
+  "headless": false, "session_mode": "chat", "agent": "general", "turn_count": 3,
+  "tool_name": "write_file", "tool_input": { "path": "..." }
+}
+```
+
+`origin` is `"user"` for user-started sessions or `"vix"` for daemon-initiated
+ones; `trigger_type`/`trigger_ref` identify the job/hook that started a vix
+session. Event-specific fields: `tool_name`/`tool_input` (tool events),
+`tool_response`/`is_error` (PostToolUse), `prompt` (UserPromptSubmit),
+`source` (SessionStart).
+
+> Recursion guard: hooks never fire inside vix-initiated sessions (`origin
+> == "vix"`), so a hook's own tool calls can't re-trigger hooks.
+
+## Create a conversation (notify the user)
+
+A hook often needs to *tell the user something* — surface a finding, ask for
+feedback, flag a result. Use `vix session create` to drop a one-message
+conversation into the Sessions tab under "Vix-initiated" without re-encoding any
+on-disk format. It reads a JSON spec from stdin (or `--json` / `--file`):
+
+```bash
+echo '{
+  "message": "Heads up: 3 dependencies have new security advisories.",
+  "cwd": "/abs/project",
+  "title": "Dependency advisory"
+}' | vix session create
+```
+
+Spec fields: `message` and `cwd` are **required** (`cwd` must be an existing
+directory); `title` and `unread` (default true) are optional. The session is
+created with `origin: "vix"`, so it groups under "Vix-initiated" and — thanks to
+the recursion guard — never fires hooks itself. When the user opens it and
+replies, it continues as a normal conversation. Zero LLM tokens: the message is
+your literal text.
+
+This is the cheap way for a **command** hook to reach the user. Command hooks
+spawn no session of their own, so they're ideal for bookkeeping (e.g. count
+events in a file) that only occasionally calls `vix session create` once a
+threshold is crossed. (An async workflow/prompt hook also lands in
+"Vix-initiated", but it spends a session/LLM turn every time it fires.)
+
+## Example: block writes to protected files (deterministic)
+
+`~/.vix/hooks/protect.json`:
+
+```json
+{
+  "id": "protect", "enabled": true, "mode": "sync", "blocking": true,
+  "trigger": { "event": "PreToolUse", "matcher": "write_file|edit_file|delete_file" },
+  "command": "p=$(jq -r .tool_input.path); case \"$p\" in *.env|*/secrets/*) echo \"protected: $p\" >&2; exit 2;; esac; exit 0"
+}
+```
+
+## Verification
+
+After writing a hook file, read it back and confirm it parses. To check it is
+active, trigger its event (e.g. ask the agent to write a matching file) and
+confirm the deny/modify/context behaviour. Invalid specs are skipped; common
+mistakes: setting more than one of command/workflow/prompt, `blocking` without
+`"mode": "sync"`, or `blocking` on a non-blockable event.
+
+## Kill switch
+
+Disable the whole engine with `"features": { "hooks": false }` in
+`settings.json`, or `VIX_DISABLE_HOOKS=1`.

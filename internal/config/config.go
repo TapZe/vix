@@ -227,6 +227,16 @@ func JobsEnabled() bool {
 	return feature("jobs", true)
 }
 
+// HooksEnabled reads the hooks feature flag (the lifecycle-hooks engine in
+// vixd). Defaults to true; the VIX_DISABLE_HOOKS environment variable overrides
+// everything as an emergency kill switch.
+func HooksEnabled() bool {
+	if v := os.Getenv("VIX_DISABLE_HOOKS"); v == "1" || v == "true" {
+		return false
+	}
+	return feature("hooks", true)
+}
+
 // JobsMaxConcurrentRuns reads jobs.max_concurrent_runs from
 // ~/.vix/settings.json. Returns 0 when absent/invalid, letting the scheduler
 // apply its default.

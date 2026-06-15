@@ -23,11 +23,12 @@ FROM debian:bookworm-slim
 ARG TARGETARCH
 
 # bash + coreutils so the agent's bash tool (ls, cat, …) works inside the
-# container; ca-certificates is harmless and handy. fontconfig/fonts let freeze
-# render text glyphs in the PNGs.
+# container; grep + jq so lifecycle-hook commands can match/parse tool input the
+# way real hooks (and the docs' examples) do; ca-certificates is harmless and
+# handy. fontconfig/fonts let freeze render text glyphs in the PNGs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash coreutils ca-certificates fontconfig fonts-dejavu bubblewrap tmux \
+      bash coreutils grep jq ca-certificates fontconfig fonts-dejavu bubblewrap tmux \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=freeze-builder /go/bin/freeze /usr/local/bin/freeze

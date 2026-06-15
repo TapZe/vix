@@ -286,6 +286,20 @@ func (p VixPaths) JobsState() string {
 	return filepath.Join(p.home, "jobs-state.json")
 }
 
+// Hooks returns the directory holding lifecycle-hook specs (<id>.json files).
+// Hooks are user-global like jobs — each spec carries its own cwd — so the
+// store lives next to jobs/: override mode uses override/hooks; normal mode
+// uses home/hooks (empty when home is unavailable, which disables the engine).
+func (p VixPaths) Hooks() string {
+	if p.override != "" {
+		return filepath.Join(p.override, "hooks")
+	}
+	if p.home == "" {
+		return ""
+	}
+	return filepath.Join(p.home, "hooks")
+}
+
 // HeartbeatMD returns the path of the user-global heartbeat whiteboard file
 // read by the default heartbeat job's prompt. Override mode:
 // override/heartbeat.md; normal mode: home/heartbeat.md.

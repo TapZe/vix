@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/get-vix/vix/internal/config"
+	"github.com/get-vix/vix/internal/daemon/hooks"
 	"github.com/get-vix/vix/internal/daemon/jobs"
 	"github.com/get-vix/vix/internal/protocol"
 )
@@ -88,6 +89,11 @@ type Server struct {
 	// flag, VIX_DISABLE_JOBS, or no home directory). Set before ListenAndServe
 	// via StartJobScheduler; the config watcher uses it for hot reload.
 	jobScheduler *jobs.Scheduler
+
+	// hookRegistry is the lifecycle-hooks engine, nil when disabled (feature
+	// flag, VIX_DISABLE_HOOKS, or no home directory). Set before ListenAndServe
+	// via EnableHooks; the config watcher uses it for hot reload.
+	hookRegistry *hooks.Registry
 
 	// Update status: the latest GitHub release seen by the once-per-day check,
 	// versus the running daemon Version. Populated by a background goroutine in
@@ -268,6 +274,22 @@ func (s *Server) EnableJobScheduler() {
 		s.notifySubscribers()
 	}
 	s.jobScheduler = jobs.NewScheduler(jobs.NewStore(dir, statePath), s.JobRunner(), notify, config.JobsMaxConcurrentRuns())
+}
+
+// EnableHooks builds the lifecycle-hooks registry from ~/.vix/hooks. Safe to
+// call once before ListenAndServe; the config watcher hot-reloads the spec
+// directory. No-op when the home directory is unavailable.
+func (s *Server) EnableHooks() {
+	paths := config.NewVixPaths("", s.homeVixDir, "")
+	dir := paths.Hooks()
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		LogError("hooks: cannot create %s: %v", dir, err)
+		return
+	}
+	s.hookRegistry = hooks.NewRegistry(hooks.NewStore(dir))
 }
 
 // seedDefaultHeartbeat writes the shipped heartbeat job spec and the

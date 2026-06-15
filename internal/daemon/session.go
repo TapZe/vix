@@ -582,6 +582,13 @@ func (s *Session) Run() {
 	// restore-time validation now that the model and workflows are resolved.
 	s.emitReplay()
 
+	// SessionStart hooks (observational): fire once the session is ready.
+	startSource := "startup"
+	if s.attachRecord != nil {
+		startSource = "resume"
+	}
+	s.fireSessionStart(startSource)
+
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -1802,6 +1809,16 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 		}
 	}
 
+	// UserPromptSubmit hooks: may rewrite or veto the prompt before it enters
+	// the conversation.
+	newText, denyReason, denied := s.userPromptSubmitHook(s.ctx, text)
+	if denied {
+		s.emit("event.error", protocol.EventError{Message: "Prompt blocked by hook: " + denyReason})
+		s.emit("event.agent_done", nil)
+		return
+	}
+	text = newText
+
 	s.AddUserMessage(text, attachments...)
 
 	// Inner loop: agent turns
@@ -1885,6 +1902,7 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 	s.unread = true // new content; cleared by session.mark_read when viewed
 	s.persist()
 	s.maybeGenerateTitle()
+	s.fireStop()
 	s.emit("event.agent_done", nil)
 }
 
@@ -2123,6 +2141,13 @@ type dispatchOptions struct {
 	emitToolCall func(ev protocol.EventToolCall)
 	// emitToolResult is called after each tool completes.
 	emitToolResult func(toolID, name string, input map[string]any, output string, isError bool, lineOffset int)
+	// beforeTool, when set, fires PreToolUse hooks before a tool executes. It
+	// returns rewritten input (modify), a deny reason, and a denied flag. Only
+	// wired for the main session dispatcher; nil for subagents.
+	beforeTool func(ctx context.Context, name string, input map[string]any) (newInput map[string]any, denyReason string, denied bool)
+	// afterTool, when set, fires PostToolUse hooks after a tool completes,
+	// possibly appending context to the result. Nil for subagents.
+	afterTool func(ctx context.Context, name string, input map[string]any, result *ToolResult)
 	// toolTimeoutDefault is the floor for tool-call timeouts used by the
 	// TimeoutSec field of emitted tool_call events. When zero, falls back to
 	// the package-level defaultToolTimeoutDefault constant.
@@ -2302,6 +2327,20 @@ func executeToolsParallel(ctx context.Context, tasks []*toolTask, opts dispatchO
 			defer wg.Done()
 
 			silent := isSilentCtx(ctx)
+			if opts.beforeTool != nil {
+				newInput, denyReason, denied := opts.beforeTool(ctx, t.toolUse.Name, t.input)
+				if denied {
+					t.result = &ToolResult{Output: denyReason, IsError: true}
+					t.apiResult = llm.NewToolResultBlock(t.toolUse.ID, denyReason, true)
+					if opts.emitToolResult != nil {
+						opts.emitToolResult(t.toolUse.ID, t.toolUse.Name, t.input, denyReason, true, 0)
+					}
+					return
+				}
+				if newInput != nil {
+					t.input = newInput
+				}
+			}
 			if !silent {
 				log.Printf("[dispatch] exec start: %s id=%s", t.toolUse.Name, t.toolUse.ID)
 			}
@@ -2321,6 +2360,9 @@ func executeToolsParallel(ctx context.Context, tasks []*toolTask, opts dispatchO
 				return
 			}
 
+			if opts.afterTool != nil {
+				opts.afterTool(ctx, t.toolUse.Name, t.input, result)
+			}
 			t.result = result
 			t.apiResult = llm.NewToolResultBlock(t.toolUse.ID, result.Output, result.IsError)
 			if opts.emitToolResult != nil {
@@ -2337,6 +2379,9 @@ func executeToolsParallel(ctx context.Context, tasks []*toolTask, opts dispatchO
 			continue
 		}
 		result := resolveConfirmation(ctx, t, opts)
+		if opts.afterTool != nil {
+			opts.afterTool(ctx, t.toolUse.Name, t.input, result)
+		}
 		t.result = result
 		t.apiResult = llm.NewToolResultBlock(t.toolUse.ID, result.Output, result.IsError)
 		if opts.emitToolResult != nil {
@@ -2365,6 +2410,20 @@ func executeToolsSequential(ctx context.Context, tasks []*toolTask, opts dispatc
 		}
 
 		silent := isSilentCtx(ctx)
+		if opts.beforeTool != nil {
+			newInput, denyReason, denied := opts.beforeTool(ctx, t.toolUse.Name, t.input)
+			if denied {
+				t.result = &ToolResult{Output: denyReason, IsError: true}
+				t.apiResult = llm.NewToolResultBlock(t.toolUse.ID, denyReason, true)
+				if opts.emitToolResult != nil {
+					opts.emitToolResult(t.toolUse.ID, t.toolUse.Name, t.input, denyReason, true, 0)
+				}
+				continue
+			}
+			if newInput != nil {
+				t.input = newInput
+			}
+		}
 		if !silent {
 			log.Printf("[dispatch] exec start: %s id=%s", t.toolUse.Name, t.toolUse.ID)
 		}
@@ -2382,6 +2441,9 @@ func executeToolsSequential(ctx context.Context, tasks []*toolTask, opts dispatc
 			result = resolveConfirmation(ctx, t, opts)
 		}
 
+		if opts.afterTool != nil {
+			opts.afterTool(ctx, t.toolUse.Name, t.input, result)
+		}
 		t.result = result
 		t.apiResult = llm.NewToolResultBlock(t.toolUse.ID, result.Output, result.IsError)
 		if opts.emitToolResult != nil {
@@ -2422,6 +2484,8 @@ func (s *Session) sessionDispatchToolCalls(ctx context.Context, msg *llm.Message
 		executeTool: func(name string, input map[string]any) *ToolResult {
 			return s.executeToolDirect(ctx, name, input)
 		},
+		beforeTool: s.preToolUseHook,
+		afterTool:  s.postToolUseHook,
 		handleSpecial: func(ctx context.Context, name string, input map[string]any) (*ToolResult, bool) {
 			switch name {
 			case "ask_question_to_user":

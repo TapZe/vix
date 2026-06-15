@@ -1,0 +1,208 @@
+// Package hooks implements vixd's lifecycle-hooks engine: user-authored hook
+// specs (~/.vix/hooks/<id>.json) that fire on agent-loop events (a tool about
+// to run, a prompt submitted, a session starting, …) rather than on a timer.
+//
+// A hook either runs synchronously and returns a Decision that can veto/rewrite
+// the triggering action (mode "sync"), or fires-and-forgets in an isolated
+// session (mode "async"). The package owns parsing, validation, and the
+// in-memory registry; actual execution is delegated to the daemon, keeping the
+// dependency direction daemon → hooks.
+package hooks
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
+
+// Lifecycle events a hook can subscribe to. Only events listed in
+// supportedEvents are accepted by Validate; the rest of the catalogue is added
+// as it gets wired into the session loop.
+const (
+	EventPreToolUse       = "PreToolUse"
+	EventPostToolUse      = "PostToolUse"
+	EventUserPromptSubmit = "UserPromptSubmit"
+	EventSessionStart     = "SessionStart"
+	EventStop             = "Stop"
+)
+
+// Execution modes.
+const (
+	ModeSync  = "sync"
+	ModeAsync = "async"
+)
+
+// supportedEvents is the set of events the engine currently fires. Authoring a
+// hook for any other event is rejected so users get an error instead of a hook
+// that silently never runs.
+var supportedEvents = map[string]bool{
+	EventPreToolUse:       true,
+	EventPostToolUse:      true,
+	EventUserPromptSubmit: true,
+	EventSessionStart:     true,
+	EventStop:             true,
+}
+
+// blockableEvents is the subset whose sync hooks may veto (Decision deny) or
+// rewrite (Decision modify) the triggering action. Other events can only inject
+// context or run async.
+var blockableEvents = map[string]bool{
+	EventPreToolUse:       true,
+	EventUserPromptSubmit: true,
+}
+
+// defaultSyncTimeout bounds a synchronous hook so it can never wedge the agent
+// loop. defaultAsyncTimeout bounds a fire-and-forget run.
+const (
+	defaultSyncTimeout  = 5 * time.Second
+	defaultAsyncTimeout = 10 * time.Minute
+)
+
+// HookTrigger selects which event fires the hook and (optionally) narrows it
+// with a regex matched against the event's match field (tool name for tool
+// events, source for SessionStart, …). An empty or "*" matcher matches all.
+type HookTrigger struct {
+	Event   string `json:"event"`
+	Matcher string `json:"matcher,omitempty"`
+}
+
+// Permissions maps onto the isolated session's automatic-permission flags for
+// workflow/prompt hooks. Pointers so "absent" defaults to true.
+type Permissions struct {
+	AutoWrite *bool `json:"auto_write,omitempty"`
+	AutoDirs  *bool `json:"auto_dirs,omitempty"`
+}
+
+// Spec is a user-authored hook definition, one JSON file per hook under
+// ~/.vix/hooks/. Exactly one of Command, Workflow, or Prompt names what runs.
+type Spec struct {
+	ID       string      `json:"id"`
+	Name     string      `json:"name,omitempty"`
+	Enabled  bool        `json:"enabled"`
+	Trigger  HookTrigger `json:"trigger"`
+	Mode     string      `json:"mode,omitempty"`     // sync | async (default async)
+	Blocking bool        `json:"blocking,omitempty"` // sync only; may veto
+
+	Command  string `json:"command,omitempty"`  // shell command (fast path)
+	Workflow string `json:"workflow,omitempty"` // workflow name
+	Prompt   string `json:"prompt,omitempty"`   // plain prompt (LLM)
+
+	CWD         string      `json:"cwd,omitempty"`
+	Permissions Permissions `json:"permissions,omitempty"`
+	Timeout     string      `json:"timeout,omitempty"`
+	CreatedBy   string      `json:"created_by,omitempty"`
+
+	// matcherRe is the compiled, anchored matcher. nil means match-all.
+	matcherRe *regexp.Regexp
+}
+
+// EffectiveMode returns the resolved execution mode, defaulting to async so a
+// hook never blocks the loop unless it opts in.
+func (s *Spec) EffectiveMode() string {
+	if s.Mode == ModeSync {
+		return ModeSync
+	}
+	return ModeAsync
+}
+
+// Validate reports the first problem with the spec, or nil. It also compiles
+// the matcher.
+func (s *Spec) Validate() error {
+	if s.ID == "" {
+		return fmt.Errorf("missing id")
+	}
+	if s.Trigger.Event == "" {
+		return fmt.Errorf("missing trigger.event")
+	}
+	if !supportedEvents[s.Trigger.Event] {
+		return fmt.Errorf("unsupported trigger.event %q", s.Trigger.Event)
+	}
+	if s.Mode != "" && s.Mode != ModeSync && s.Mode != ModeAsync {
+		return fmt.Errorf("invalid mode %q (want \"sync\" or \"async\")", s.Mode)
+	}
+	n := 0
+	for _, v := range []string{s.Command, s.Workflow, s.Prompt} {
+		if strings.TrimSpace(v) != "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return fmt.Errorf("hook must set exactly one of command, workflow, or prompt")
+	}
+	if n > 1 {
+		return fmt.Errorf("hook must set only one of command, workflow, or prompt")
+	}
+	if s.Blocking {
+		if s.EffectiveMode() != ModeSync {
+			return fmt.Errorf("blocking hooks require mode \"sync\"")
+		}
+		if !blockableEvents[s.Trigger.Event] {
+			return fmt.Errorf("event %q cannot block (only PreToolUse and UserPromptSubmit may veto)", s.Trigger.Event)
+		}
+	}
+	if s.Timeout != "" {
+		d, err := time.ParseDuration(s.Timeout)
+		if err != nil {
+			return fmt.Errorf("invalid timeout: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("invalid timeout: must be positive")
+		}
+	}
+	re, err := compileMatcher(s.Trigger.Matcher)
+	if err != nil {
+		return fmt.Errorf("invalid matcher: %w", err)
+	}
+	s.matcherRe = re
+	return nil
+}
+
+// Matches reports whether field satisfies the hook's matcher. A nil/absent
+// matcher matches everything.
+func (s *Spec) Matches(field string) bool {
+	if s.matcherRe == nil {
+		return true
+	}
+	return s.matcherRe.MatchString(field)
+}
+
+// TimeoutDuration returns the per-run wall-clock budget, defaulting by mode.
+func (s *Spec) TimeoutDuration() time.Duration {
+	if s.Timeout != "" {
+		if d, err := time.ParseDuration(s.Timeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	if s.EffectiveMode() == ModeSync {
+		return defaultSyncTimeout
+	}
+	return defaultAsyncTimeout
+}
+
+// AutoWrite reports the effective auto_write permission (default true).
+func (s *Spec) AutoWrite() bool {
+	if s.Permissions.AutoWrite == nil {
+		return true
+	}
+	return *s.Permissions.AutoWrite
+}
+
+// AutoDirs reports the effective auto_dirs permission (default true).
+func (s *Spec) AutoDirs() bool {
+	if s.Permissions.AutoDirs == nil {
+		return true
+	}
+	return *s.Permissions.AutoDirs
+}
+
+// compileMatcher turns a matcher string into an anchored regexp. "", "*" yield
+// nil (match-all). Everything else is compiled as a full-string-anchored regex,
+// so "write_file|edit_file" matches those names exactly, not as substrings.
+func compileMatcher(m string) (*regexp.Regexp, error) {
+	m = strings.TrimSpace(m)
+	if m == "" || m == "*" {
+		return nil, nil
+	}
+	return regexp.Compile("^(?:" + m + ")$")
+}

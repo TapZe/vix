@@ -31,6 +31,7 @@ type configWatcher struct {
 	wfPath   string
 	langPath string
 	jobsDir  string
+	hooksDir string
 	w        *fsnotify.Watcher
 
 	mu       sync.Mutex
@@ -85,6 +86,19 @@ func (s *Server) startConfigWatcher() {
 		}
 	}
 
+	// Hot-reload the lifecycle-hooks spec directory too, when hooks are
+	// enabled: writing ~/.vix/hooks/<id>.json takes effect without a restart.
+	if s.hookRegistry != nil {
+		hooksDir := filepath.Join(s.homeVixDir, "hooks")
+		if err := os.MkdirAll(hooksDir, 0o755); err == nil {
+			if err := w.Add(hooksDir); err == nil {
+				cw.hooksDir = hooksDir
+			} else {
+				LogError("config watcher: cannot watch %s: %v", hooksDir, err)
+			}
+		}
+	}
+
 	go cw.run(s.serverCtx)
 	LogInfo("config watcher: watching %s", dir)
 }
@@ -111,6 +125,8 @@ func (cw *configWatcher) run(ctx context.Context) {
 			default:
 				if cw.jobsDir != "" && filepath.Dir(filepath.Clean(ev.Name)) == cw.jobsDir {
 					cw.schedule(cw.jobsDir, cw.reloadJobs)
+				} else if cw.hooksDir != "" && filepath.Dir(filepath.Clean(ev.Name)) == cw.hooksDir {
+					cw.schedule(cw.hooksDir, cw.reloadHooks)
 				}
 			}
 		case err, ok := <-cw.w.Errors:
@@ -167,5 +183,13 @@ func (cw *configWatcher) reloadJobs() {
 	if cw.server.jobScheduler != nil {
 		LogInfo("config watcher: job specs changed, reloading scheduler")
 		cw.server.jobScheduler.Reload()
+	}
+}
+
+// reloadHooks asks the hook registry to re-read the hook spec directory.
+func (cw *configWatcher) reloadHooks() {
+	if cw.server.hookRegistry != nil {
+		LogInfo("config watcher: hook specs changed, reloading registry")
+		cw.server.hookRegistry.Reload()
 	}
 }

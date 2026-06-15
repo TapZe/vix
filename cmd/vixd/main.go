@@ -168,6 +168,11 @@ func main() {
 	} else {
 		log.Printf("jobs: scheduler disabled (features.jobs=false or VIX_DISABLE_JOBS)")
 	}
+	if config.HooksEnabled() {
+		server.EnableHooks()
+	} else {
+		log.Printf("hooks: engine disabled (features.hooks=false or VIX_DISABLE_HOOKS)")
+	}
 	// Background once-per-day update check. Best-effort: stores the result on
 	// the server so sessions can surface it; never blocks startup.
 	go func() {
