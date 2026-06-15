@@ -55,6 +55,18 @@ func TestVixPaths_NormalMode(t *testing.T) {
 	if claudeMD[1] != filepath.Join("/project", "CLAUDE.md") {
 		t.Errorf("ClaudeMD[1] = %q, want cwd CLAUDE.md", claudeMD[1])
 	}
+
+	agentsMD := p.AgentsMD()
+	// Normal mode: [home/AGENTS.md, cwd/AGENTS.md]
+	if len(agentsMD) != 2 {
+		t.Fatalf("AgentsMD length = %d, want 2", len(agentsMD))
+	}
+	if agentsMD[0] != filepath.Join("/home/.vix", "AGENTS.md") {
+		t.Errorf("AgentsMD[0] = %q, want home AGENTS.md", agentsMD[0])
+	}
+	if agentsMD[1] != filepath.Join("/project", "AGENTS.md") {
+		t.Errorf("AgentsMD[1] = %q, want cwd AGENTS.md", agentsMD[1])
+	}
 }
 
 func TestVixPaths_OverrideMode(t *testing.T) {
@@ -113,6 +125,11 @@ func TestVixPaths_OverrideMode(t *testing.T) {
 	claudeMD := p.ClaudeMD()
 	if len(claudeMD) != 1 || claudeMD[0] != filepath.Join("/custom", "CLAUDE.md") {
 		t.Errorf("ClaudeMD = %v", claudeMD)
+	}
+
+	agentsMD := p.AgentsMD()
+	if len(agentsMD) != 1 || agentsMD[0] != filepath.Join("/custom", "AGENTS.md") {
+		t.Errorf("AgentsMD = %v", agentsMD)
 	}
 }
 

@@ -983,9 +983,10 @@ func (s *Session) discoverInstructionFiles() []instructionFile {
 	}
 
 	if s.projectConfig.HasFeature(FeatureReadAgentsMD) {
-		path := filepath.Join(s.cwd, "AGENTS.md")
-		if data, err := os.ReadFile(path); err == nil {
-			files = append(files, instructionFile{Path: path, Content: string(data)})
+		for _, path := range s.paths.AgentsMD() {
+			if data, err := os.ReadFile(path); err == nil {
+				files = append(files, instructionFile{Path: path, Content: string(data)})
+			}
 		}
 	}
 

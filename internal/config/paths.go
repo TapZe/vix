@@ -141,6 +141,20 @@ func (p VixPaths) ClaudeMD() []string {
 	return out
 }
 
+// AgentsMD returns the AGENTS.md paths to load, in order.
+// Normal mode also includes the project root AGENTS.md (outside .vix).
+func (p VixPaths) AgentsMD() []string {
+	if p.override != "" {
+		return []string{filepath.Join(p.override, "AGENTS.md")}
+	}
+	var out []string
+	if p.home != "" {
+		out = append(out, filepath.Join(p.home, "AGENTS.md"))
+	}
+	out = append(out, filepath.Join(p.cwd, "AGENTS.md"))
+	return out
+}
+
 // Primary returns the write target for session-scoped state (history, plans,
 // access stats when override is set, etc.). Override mode: override.
 // Normal mode: cwd/.vix.

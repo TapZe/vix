@@ -158,7 +158,9 @@ The daemon nudges the model if it finishes a turn with pending/in-progress todos
 
 ## Config directory resolution
 
-By default vix merges config from two layered `.vix` directories: `~/.vix` (user defaults) and `./.vix` (project overrides). This covers `settings.json`, `agents/`, `skills/`, `AGENTS.md`, plus session state like `history.txt`, `plans/`, `access_stats.db`, and `logs/`.
+By default vix merges config from two layered `.vix` directories: `~/.vix` (user defaults) and `./.vix` (project overrides). This covers `settings.json`, `agents/`, `skills/`, plus session state like `history.txt`, `plans/`, `access_stats.db`, and `logs/`.
+
+Instruction files (`CLAUDE.md`, `AGENTS.md`) are also layered, but follow a slightly different convention: the user-global copy lives at `~/.vix/CLAUDE.md` / `~/.vix/AGENTS.md`, while the project copy lives at the **project root** (`./CLAUDE.md`, `./AGENTS.md`), not inside `./.vix`. Both load when the corresponding feature flag is enabled, home first then project (see `VixPaths.ClaudeMD()` / `VixPaths.AgentsMD()` and `Session.discoverInstructionFiles`).
 
 All path resolution flows through `config.VixPaths` (internal/config/paths.go). Add new `.vix`-relative paths there rather than hardcoding `filepath.Join(cwd, ".vix", ...)`.
 
