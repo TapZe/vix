@@ -106,15 +106,18 @@ hooks: appended to the message). Use it to filter inside the hook body:
   "session_id": "...", "hook_event_name": "PreToolUse", "cwd": "/path",
   "model": "anthropic/...", "permission_mode": "default", "origin": "user",
   "headless": false, "session_mode": "chat", "agent": "general", "turn_count": 3,
+  "vix_bin": "/usr/local/bin/vix", "socket_path": "/tmp/vixd.sock",
   "tool_name": "write_file", "tool_input": { "path": "..." }
 }
 ```
 
 `origin` is `"user"` for user-started sessions or `"vix"` for daemon-initiated
 ones; `trigger_type`/`trigger_ref` identify the job/hook that started a vix
-session. Event-specific fields: `tool_name`/`tool_input` (tool events),
-`tool_response`/`is_error` (PostToolUse), `prompt` (UserPromptSubmit),
-`source` (SessionStart).
+session. `vix_bin` and `socket_path` let a hook call back into *this* daemon
+without guessing the binary path or socket — e.g.
+`"$vix_bin" session create --socket-path "$socket_path"`. Event-specific
+fields: `tool_name`/`tool_input` (tool events), `tool_response`/`is_error`
+(PostToolUse), `prompt` (UserPromptSubmit), `source` (SessionStart).
 
 > Recursion guard: hooks never fire inside vix-initiated sessions (`origin
 > == "vix"`), so a hook's own tool calls can't re-trigger hooks.
@@ -124,22 +127,28 @@ session. Event-specific fields: `tool_name`/`tool_input` (tool events),
 A hook often needs to *tell the user something* — surface a finding, ask for
 feedback, flag a result. Use `vix session create` to drop a one-message
 conversation into the Sessions tab under "Vix-initiated" without re-encoding any
-on-disk format. It reads a JSON spec from stdin (or `--json` / `--file`):
+on-disk format. It reads a JSON spec from stdin (or `--json` / `--file`), and
+should call back through the daemon using `vix_bin`/`socket_path` from the
+context:
 
 ```bash
-echo '{
-  "message": "Heads up: 3 dependencies have new security advisories.",
-  "cwd": "/abs/project",
-  "title": "Dependency advisory"
-}' | vix session create
+ctx=$(cat)
+vix_bin=$(printf '%s' "$ctx" | sed -n 's/.*"vix_bin":"\([^"]*\)".*/\1/p')
+sock=$(printf '%s' "$ctx" | sed -n 's/.*"socket_path":"\([^"]*\)".*/\1/p')
+"${vix_bin:-vix}" session create --socket-path "$sock" <<JSON
+{ "message": "Heads up: 3 dependencies have new security advisories.",
+  "cwd": "$HOME", "title": "Dependency advisory" }
+JSON
 ```
 
-Spec fields: `message` and `cwd` are **required** (`cwd` must be an existing
-directory); `title` and `unread` (default true) are optional. The session is
-created with `origin: "vix"`, so it groups under "Vix-initiated" and — thanks to
-the recursion guard — never fires hooks itself. When the user opens it and
-replies, it continues as a normal conversation. Zero LLM tokens: the message is
-your literal text.
+Spec fields: exactly one of `message` or `message_file` (an absolute path whose
+contents become the message — handy for multi-line markdown without JSON
+escaping), plus a required `cwd` (must be an existing directory); `title` and
+`unread` (default true) are optional. The session is created with
+`origin: "vix"`, so it groups under "Vix-initiated" and — thanks to the
+recursion guard — never fires hooks itself. When the user opens it and replies,
+it continues as a normal conversation. Zero LLM tokens: the message is your
+literal text.
 
 This is the cheap way for a **command** hook to reach the user. Command hooks
 spawn no session of their own, so they're ideal for bookkeeping (e.g. count

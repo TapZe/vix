@@ -46,6 +46,12 @@ func (s *Session) buildHookContext(event string, extra map[string]any) map[strin
 		"agent":           s.chatAgent,
 		"turn_count":      s.turnCount,
 	}
+	if s.server != nil {
+		// Let a hook call back into this daemon (e.g. `vix session create`)
+		// without guessing the binary path or socket.
+		m["vix_bin"] = s.server.vixBin
+		m["socket_path"] = s.server.sockPath
+	}
 	if s.parentID != "" {
 		m["parent_session_id"] = s.parentID
 	}

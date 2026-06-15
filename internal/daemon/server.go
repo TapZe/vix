@@ -53,6 +53,12 @@ type Server struct {
 	// User-level config directory (~/.vix/)
 	homeVixDir string
 
+	// vixBin is the path to the vix CLI binary, resolved once at construction as
+	// the sibling of the running vixd executable (falling back to "vix" on
+	// PATH). Exposed to hooks via the context envelope so a hook can call back
+	// into this daemon (e.g. `vix session create`) without guessing the path.
+	vixBin string
+
 	// Shared-secret token validated on every incoming socket message. Loaded
 	// once at daemon start from the file passed via vixd's -auth-token-path
 	// flag and stored in memory only — never logged, never copied into a
@@ -152,6 +158,22 @@ func (s *Server) QuitAll() {
 	})
 }
 
+// resolveVixBin returns the path to the vix CLI binary, resolved as the sibling
+// of the running vixd executable so hooks can call back into the daemon without
+// relying on PATH. Falls back to "vix" when the sibling can't be determined or
+// doesn't exist (e.g. in-process test embeddings).
+func resolveVixBin() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "vix"
+	}
+	cand := filepath.Join(filepath.Dir(exe), "vix")
+	if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+		return cand
+	}
+	return "vix"
+}
+
 // NewServer creates a new daemon server.
 func NewServer(sockPath string, cred config.Credential, sessionID, model string, daemonConfig *config.DaemonConfig, plugins PluginSource) *Server {
 	s := &Server{
@@ -164,6 +186,7 @@ func NewServer(sockPath string, cred config.Credential, sessionID, model string,
 		sessions:   make(map[string]*Session),
 		homeVixDir: daemonConfig.HomeVixDir,
 		authToken:  daemonConfig.AuthToken,
+		vixBin:     resolveVixBin(),
 	}
 
 	// Set LLM log directory to ~/.vix/logs/

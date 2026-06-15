@@ -17,8 +17,13 @@ import (
 // `vix session create` CLI. Deliberately a small surface (not the internal
 // sessionRecord) so the on-disk format can evolve independently.
 type MessageSessionSpec struct {
-	// Message is the assistant text shown to the user. Required.
+	// Message is the assistant text shown to the user. Required unless
+	// MessageFile is set (exactly one of the two).
 	Message string `json:"message"`
+	// MessageFile is an absolute path whose contents become the message text.
+	// Set this instead of Message to avoid encoding multi-line content in JSON
+	// (e.g. a hook delivering markdown). The file must exist and be non-empty.
+	MessageFile string `json:"message_file,omitempty"`
 	// CWD is the project the conversation is scoped to. Required; must be an
 	// existing directory. The session surfaces in any TUI launched there.
 	CWD string `json:"cwd"`
@@ -37,7 +42,18 @@ type MessageSessionSpec struct {
 // the single implementation behind writeJobAlertSession, the message.create
 // RPC, and `vix session create`.
 func (s *Server) createMessageSession(spec MessageSessionSpec) (string, error) {
-	if strings.TrimSpace(spec.Message) == "" {
+	message := spec.Message
+	if spec.MessageFile != "" {
+		if strings.TrimSpace(spec.Message) != "" {
+			return "", fmt.Errorf("set only one of message or message_file")
+		}
+		b, err := os.ReadFile(spec.MessageFile)
+		if err != nil {
+			return "", fmt.Errorf("read message_file: %w", err)
+		}
+		message = string(b)
+	}
+	if strings.TrimSpace(message) == "" {
 		return "", fmt.Errorf("missing message")
 	}
 	if strings.TrimSpace(spec.CWD) == "" {
@@ -61,7 +77,7 @@ func (s *Server) createMessageSession(spec MessageSessionSpec) (string, error) {
 		Unread:  unread,
 		Messages: []llm.MessageParam{{
 			Role:    llm.RoleAssistant,
-			Content: []llm.ContentBlock{{Type: llm.BlockText, Text: spec.Message}},
+			Content: []llm.ContentBlock{{Type: llm.BlockText, Text: message}},
 		}},
 		SessionMode: "chat",
 		StartedAt:   time.Now(),
