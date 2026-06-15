@@ -157,10 +157,16 @@ type SessionUserAnswerData struct {
 	Answers map[string]string `json:"answers,omitempty"` // question ID → answer (batch mode)
 }
 
-// SessionWorkflowData carries a workflow execution request.
+// SessionWorkflowData carries a workflow execution request. Name selects a
+// workflow already loaded by the session (from config/workflow.json). Workflow,
+// when present, is an inline definition (a workflow.Def) registered into the
+// session's workflow set for this run; the session looks it up by its own name.
+// Carried as raw JSON so the protocol package stays free of a workflow-package
+// dependency.
 type SessionWorkflowData struct {
-	Name string `json:"name"`
-	Text string `json:"text"`
+	Name     string          `json:"name"`
+	Text     string          `json:"text"`
+	Workflow json.RawMessage `json:"workflow,omitempty"`
 }
 
 // SessionWorkflowMessageData carries a user message to inject into the running workflow.

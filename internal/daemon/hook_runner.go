@@ -132,10 +132,15 @@ func (s *Server) runHookSession(ctx context.Context, spec hooks.Spec, text, cwd 
 	go session.Run()
 
 	var startCmd protocol.SessionCommand
-	if spec.Workflow != "" {
-		data, _ := json.Marshal(protocol.SessionWorkflowData{Name: spec.Workflow, Text: text})
+	switch {
+	case spec.Workflow != nil:
+		raw, _ := json.Marshal(spec.Workflow)
+		data, _ := json.Marshal(protocol.SessionWorkflowData{Name: spec.Workflow.Name, Text: text, Workflow: raw})
 		startCmd = protocol.SessionCommand{Type: "session.workflow", Data: data}
-	} else {
+	case spec.WorkflowID != "":
+		data, _ := json.Marshal(protocol.SessionWorkflowData{Name: spec.WorkflowID, Text: text})
+		startCmd = protocol.SessionCommand{Type: "session.workflow", Data: data}
+	default:
 		data, _ := json.Marshal(protocol.SessionInputData{Text: text})
 		startCmd = protocol.SessionCommand{Type: "session.input", Data: data}
 	}

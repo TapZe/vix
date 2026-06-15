@@ -79,8 +79,9 @@ means restart the daemon: `vix daemon stop && vix daemon start`.
 
 vixd runs a scheduler over `~/.vix/jobs/*.json` (hot-reloaded; runtime state in
 `~/.vix/jobs-state.json` — spec/state split so user files never churn). Each
-run executes in an isolated headless session (plain prompt, or a workflow via
-the `workflow` field) and lands in the Sessions tab under "Vix-initiated".
+run executes in an isolated headless session (plain prompt, or a workflow named
+via `workflow_id` or embedded inline via `workflow` — at most one) and lands in
+the Sessions tab under "Vix-initiated".
 Triggers: `cron` (robfig syntax incl. `@every`) and one-shot `at`. The shipped
 `heartbeat` job reads `~/.vix/heartbeat.md` every 30 minutes and skips with
 zero tokens while the file is effectively empty (or the run answers

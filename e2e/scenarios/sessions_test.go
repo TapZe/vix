@@ -542,3 +542,50 @@ func TestSessionsVixInitiated(t *testing.T) {
 	}
 	h.UI.Shot("vix-initiated")
 }
+
+// inlineWorkflowJobSpec is a one-shot job that runs a self-contained inline
+// workflow (no entry in config/workflow.json). The single agent step streams a
+// reply through the mock, so the run produces a persisted Vix-initiated session
+// — proving the inline-workflow dispatch path end-to-end.
+const inlineWorkflowJobSpec = `{
+  "id": "e2e-inline",
+  "name": "E2E Inline",
+  "enabled": true,
+  "trigger": {"type": "at", "time": "2000-01-01T00:00:00Z"},
+  "prompt": "Say hello from the inline workflow.",
+  "workflow": {
+    "name": "e2e-inline-wf",
+    "entry_point": {"id": "do"},
+    "steps": {
+      "do": {"type": "agent", "agent": "general", "prompt": "$(workflow.prompt)"}
+    }
+  },
+  "cwd": "{{WORKDIR}}",
+  "created_by": "vix"
+}`
+
+// TestSessionsVixInitiatedInlineWorkflow verifies that a scheduled job carrying
+// an inline workflow definition (rather than a named workflow_id) runs that
+// workflow and lands in the Vix-initiated group.
+func TestSessionsVixInitiatedInlineWorkflow(t *testing.T) {
+	h := harness.Start(t, sessionsMeta("a scheduled job with an inline workflow runs and appears in the Vix-initiated group"),
+		harness.WithEnv("VIX_DISABLE_JOBS", "0"),
+		harness.WithHomeFile(".vix/jobs/e2e-inline.json", inlineWorkflowJobSpec),
+	)
+
+	// The inline workflow's single agent step calls the mock once.
+	h.Mock.Enqueue(harness.Text("hello from the inline workflow step"))
+
+	h.UI.WaitStable(500 * time.Millisecond)
+	h.UI.Key("f1")
+	if !pollUntil(20*time.Second, func() bool {
+		s := h.UI.Snapshot()
+		return strings.Contains(s, "Vix-initiated") && strings.Contains(s, "e2e-inline")
+	}) {
+		t.Fatalf("Vix-initiated inline-workflow run not listed; screen:\n%s", h.UI.Snapshot())
+	}
+	if !h.UI.Contains("ok") {
+		t.Fatalf("inline-workflow job run status not shown; screen:\n%s", h.UI.Snapshot())
+	}
+	h.UI.Shot("vix-initiated-inline")
+}

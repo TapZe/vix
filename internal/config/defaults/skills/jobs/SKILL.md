@@ -10,8 +10,9 @@ job; the directory is hot-reloaded, so **creating a job = writing a file with
 `write_file`**. There is no dedicated tool.
 
 Every run executes in an isolated headless session: either a plain chat turn
-with the general agent, or a workflow when `workflow` is set. Finished runs
-appear in the user's Sessions tab under "Vix-initiated".
+with the general agent, or a workflow when `workflow_id` (a named workflow) or
+`workflow` (an inline definition) is set. Finished runs appear in the user's
+Sessions tab under "Vix-initiated".
 
 ## Job spec — `~/.vix/jobs/<id>.json`
 
@@ -22,7 +23,7 @@ appear in the user's Sessions tab under "Vix-initiated".
   "enabled": true,
   "trigger": { "type": "cron", "expr": "0 9 * * *", "tz": "Europe/Paris" },
   "prompt": "$(file:tasks/daily-audit.md)",
-  "workflow": "dep-audit",
+  "workflow_id": "dep-audit",
   "cwd": "/absolute/path/to/project",
   "permissions": { "auto_write": true, "auto_dirs": true },
   "skip_if_empty": false,
@@ -45,8 +46,14 @@ Field rules:
     Runs once, then the job is marked completed (kept on disk, not re-fired).
 - `prompt` — required. Literal text, `$(file:relative/path)` (resolved against
   `cwd` **at fire time**, so editing the file changes the next run), or a mix.
-- `workflow` — optional. Set: the run executes that workflow with the resolved
-  prompt as `$(workflow.prompt)`. Unset: a plain chat turn.
+- `workflow_id` / `workflow` — optional, **at most one**. `workflow_id` names a
+  workflow defined in `config/workflow.json`; `workflow` is a self-contained
+  inline definition (same schema as a `config/workflow.json` entry, embedded
+  directly in the job — no separate file needed). Either way the run executes
+  that workflow with the resolved prompt as `$(workflow.prompt)`. Setting both
+  is a validation error. Both unset: a plain chat turn. Prefer inline `workflow`
+  for a one-off pipeline used only by this job; use `workflow_id` to share one
+  definition across jobs/hooks/the TUI.
 - `cwd` — required, absolute. The project the run works in.
 - `permissions` — both default **true** (unattended runs write without
   confirmation). Set `auto_write`/`auto_dirs` to `false` to restrict; denied
@@ -114,7 +121,11 @@ session, recorded as skipped. Example workflow (in
 }
 ```
 
-Job: `{"trigger": {"type": "cron", "expr": "@every 2m"}, "workflow": "watch-prs", "prompt": "poll", ...}`.
+Job: `{"trigger": {"type": "cron", "expr": "@every 2m"}, "workflow_id": "watch-prs", "prompt": "poll", ...}`.
+
+For a one-off watcher you can skip `config/workflow.json` entirely and embed the
+same definition inline under the job's `workflow` field instead of referencing
+it by `workflow_id`.
 
 ## Workflow knobs that matter for jobs
 

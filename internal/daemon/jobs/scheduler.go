@@ -95,17 +95,18 @@ func NewScheduler(store *Store, runner Runner, notify func(string, any), maxConc
 // jobs tab). It carries the spec fields the UI renders, with permissions
 // resolved to their effective booleans and the timeout defaulted.
 type JobSnapshot struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Enabled   bool    `json:"enabled"`
-	Trigger   Trigger `json:"trigger"`
-	Workflow  string  `json:"workflow"`
-	Prompt    string  `json:"prompt"`
-	CWD       string  `json:"cwd"`
-	AutoWrite bool    `json:"auto_write"`
-	AutoDirs  bool    `json:"auto_dirs"`
-	Timeout   string  `json:"timeout"`
-	CreatedBy string  `json:"created_by"`
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Enabled        bool    `json:"enabled"`
+	Trigger        Trigger `json:"trigger"`
+	WorkflowID     string  `json:"workflow_id"`     // named workflow reference, if any
+	WorkflowInline bool    `json:"workflow_inline"` // true when the job carries an inline workflow definition
+	Prompt         string  `json:"prompt"`
+	CWD            string  `json:"cwd"`
+	AutoWrite      bool    `json:"auto_write"`
+	AutoDirs       bool    `json:"auto_dirs"`
+	Timeout        string  `json:"timeout"`
+	CreatedBy      string  `json:"created_by"`
 }
 
 // Snapshot returns the current set of job specs as read-only views, sorted by
@@ -120,17 +121,18 @@ func (s *Scheduler) Snapshot() []JobSnapshot {
 			timeout = "10m" // documented default (DefaultTimeout)
 		}
 		out = append(out, JobSnapshot{
-			ID:        id,
-			Name:      spec.Name,
-			Enabled:   spec.Enabled,
-			Trigger:   spec.Trigger,
-			Workflow:  spec.Workflow,
-			Prompt:    spec.Prompt,
-			CWD:       spec.CWD,
-			AutoWrite: spec.AutoWrite(),
-			AutoDirs:  spec.AutoDirs(),
-			Timeout:   timeout,
-			CreatedBy: spec.CreatedBy,
+			ID:             id,
+			Name:           spec.Name,
+			Enabled:        spec.Enabled,
+			Trigger:        spec.Trigger,
+			WorkflowID:     spec.WorkflowID,
+			WorkflowInline: spec.Workflow != nil,
+			Prompt:         spec.Prompt,
+			CWD:            spec.CWD,
+			AutoWrite:      spec.AutoWrite(),
+			AutoDirs:       spec.AutoDirs(),
+			Timeout:        timeout,
+			CreatedBy:      spec.CreatedBy,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

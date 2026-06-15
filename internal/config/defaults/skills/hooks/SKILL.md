@@ -34,11 +34,16 @@ fire-and-forget, in an isolated session (`"mode": "async"`, the default).
 }
 ```
 
-Exactly one of `command`, `workflow`, or `prompt` says what runs:
+Exactly one action runs — `command`, a workflow (`workflow_id` or `workflow`),
+or `prompt`:
 
 - `command` — a shell command (run via `bash -c`). The fast, deterministic path;
   recommended for sync/blocking hooks.
-- `workflow` — a workflow name (a single bash step works great for a fast veto).
+- `workflow_id` — a workflow name defined in `config/workflow.json` (a single
+  bash step works great for a fast veto).
+- `workflow` — an inline workflow definition (same schema as a
+  `config/workflow.json` entry) embedded directly in the hook, for a one-off
+  pipeline that needs no separate file. Mutually exclusive with `workflow_id`.
 - `prompt` — a plain prompt evaluated by an LLM in an isolated session.
 
 ### Events (`trigger.event`)
@@ -173,8 +178,9 @@ threshold is crossed. (An async workflow/prompt hook also lands in
 After writing a hook file, read it back and confirm it parses. To check it is
 active, trigger its event (e.g. ask the agent to write a matching file) and
 confirm the deny/modify/context behaviour. Invalid specs are skipped; common
-mistakes: setting more than one of command/workflow/prompt, `blocking` without
-`"mode": "sync"`, or `blocking` on a non-blockable event.
+mistakes: setting more than one action (command / workflow_id / workflow /
+prompt — and `workflow_id` and `workflow` are mutually exclusive), `blocking`
+without `"mode": "sync"`, or `blocking` on a non-blockable event.
 
 ## Kill switch
 

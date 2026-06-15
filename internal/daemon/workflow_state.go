@@ -22,17 +22,6 @@ const (
 	WorkflowStatusComplete      = "complete"
 )
 
-// WorkflowBudget is the optional `budget` block on a workflow definition.
-// Zero/absent fields mean "unlimited" for that dimension. When any limit is
-// exceeded the engine routes to OnExceeded (or stops when absent) exactly
-// once, with the run status set to budget_limited.
-type WorkflowBudget struct {
-	MaxTokens     int64    `json:"max_tokens,omitempty"`     // total tokens (input+output+cache write+cache read) across all steps
-	MaxSeconds    int64    `json:"max_seconds,omitempty"`    // wall-clock seconds, accumulated across resumes
-	MaxIterations int      `json:"max_iterations,omitempty"` // loop iterations (steps executed in the main chain)
-	OnExceeded    *StepRef `json:"on_exceeded,omitempty"`    // step to route to when the budget trips (default: stop)
-}
-
 // BudgetState is the live usage accumulated by a run, persisted with it.
 type BudgetState struct {
 	TokensUsed     int64 `json:"tokens_used"`
@@ -61,9 +50,9 @@ type StepAgentState struct {
 type WorkflowRunState struct {
 	Name         string                    `json:"name"`
 	Status       string                    `json:"status"`
-	Prompt       string                    `json:"prompt"`                  // the original $(workflow.prompt)
-	CurrentRef   *StepRef                  `json:"current_ref,omitempty"`   // resume cursor: step about to execute
-	Iteration    int                       `json:"iteration"`               // total iterations across resumes
+	Prompt       string                    `json:"prompt"`                // the original $(workflow.prompt)
+	CurrentRef   *StepRef                  `json:"current_ref,omitempty"` // resume cursor: step about to execute
+	Iteration    int                       `json:"iteration"`             // total iterations across resumes
 	StepResults  map[string]*StepResult    `json:"step_results,omitempty"`
 	StepAgents   map[string]StepAgentState `json:"step_agents,omitempty"`
 	Budget       BudgetState               `json:"budget"`

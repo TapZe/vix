@@ -54,13 +54,22 @@ func (s *Server) runJob(ctx context.Context, spec jobs.Spec, resolvedPrompt stri
 
 	go session.Run()
 
-	// Dispatch exactly like headless: workflow set → session.workflow with the
-	// resolved prompt as $(workflow.prompt); nil → plain chat turn.
+	// Dispatch exactly like headless, resolving the prompt as $(workflow.prompt)
+	// when a workflow is involved:
+	//   - inline workflow → session.workflow carrying the definition (the
+	//     session registers it transiently and runs it);
+	//   - named workflow_id → session.workflow by name;
+	//   - neither → plain chat turn.
 	var startCmd protocol.SessionCommand
-	if spec.Workflow != "" {
-		data, _ := json.Marshal(protocol.SessionWorkflowData{Name: spec.Workflow, Text: resolvedPrompt})
+	switch {
+	case spec.Workflow != nil:
+		raw, _ := json.Marshal(spec.Workflow)
+		data, _ := json.Marshal(protocol.SessionWorkflowData{Name: spec.Workflow.Name, Text: resolvedPrompt, Workflow: raw})
 		startCmd = protocol.SessionCommand{Type: "session.workflow", Data: data}
-	} else {
+	case spec.WorkflowID != "":
+		data, _ := json.Marshal(protocol.SessionWorkflowData{Name: spec.WorkflowID, Text: resolvedPrompt})
+		startCmd = protocol.SessionCommand{Type: "session.workflow", Data: data}
+	default:
 		data, _ := json.Marshal(protocol.SessionInputData{Text: resolvedPrompt})
 		startCmd = protocol.SessionCommand{Type: "session.input", Data: data}
 	}

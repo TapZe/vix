@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/get-vix/vix/internal/workflow"
 )
 
 // Lifecycle events a hook can subscribe to. Only events listed in
@@ -75,7 +77,8 @@ type Permissions struct {
 }
 
 // Spec is a user-authored hook definition, one JSON file per hook under
-// ~/.vix/hooks/. Exactly one of Command, Workflow, or Prompt names what runs.
+// ~/.vix/hooks/. Exactly one action runs: Command, a workflow (named via
+// WorkflowID or embedded inline in Workflow), or Prompt.
 type Spec struct {
 	ID       string      `json:"id"`
 	Name     string      `json:"name,omitempty"`
@@ -84,9 +87,10 @@ type Spec struct {
 	Mode     string      `json:"mode,omitempty"`     // sync | async (default async)
 	Blocking bool        `json:"blocking,omitempty"` // sync only; may veto
 
-	Command  string `json:"command,omitempty"`  // shell command (fast path)
-	Workflow string `json:"workflow,omitempty"` // workflow name
-	Prompt   string `json:"prompt,omitempty"`   // plain prompt (LLM)
+	Command    string        `json:"command,omitempty"`     // shell command (fast path)
+	WorkflowID string        `json:"workflow_id,omitempty"` // named workflow (config/workflow.json)
+	Workflow   *workflow.Def `json:"workflow,omitempty"`    // inline workflow definition
+	Prompt     string        `json:"prompt,omitempty"`      // plain prompt (LLM)
 
 	CWD         string      `json:"cwd,omitempty"`
 	Permissions Permissions `json:"permissions,omitempty"`
@@ -121,17 +125,32 @@ func (s *Spec) Validate() error {
 	if s.Mode != "" && s.Mode != ModeSync && s.Mode != ModeAsync {
 		return fmt.Errorf("invalid mode %q (want \"sync\" or \"async\")", s.Mode)
 	}
+	// At most one way to name the workflow action.
+	if s.WorkflowID != "" && s.Workflow != nil {
+		return fmt.Errorf("set only one of workflow_id or workflow, not both")
+	}
+	// Exactly one action: command, a workflow (named or inline), or prompt.
+	hasWorkflow := strings.TrimSpace(s.WorkflowID) != "" || s.Workflow != nil
 	n := 0
-	for _, v := range []string{s.Command, s.Workflow, s.Prompt} {
-		if strings.TrimSpace(v) != "" {
-			n++
-		}
+	if strings.TrimSpace(s.Command) != "" {
+		n++
+	}
+	if hasWorkflow {
+		n++
+	}
+	if strings.TrimSpace(s.Prompt) != "" {
+		n++
 	}
 	if n == 0 {
 		return fmt.Errorf("hook must set exactly one of command, workflow, or prompt")
 	}
 	if n > 1 {
 		return fmt.Errorf("hook must set only one of command, workflow, or prompt")
+	}
+	if s.Workflow != nil {
+		if err := workflow.Validate(s.Workflow); err != nil {
+			return fmt.Errorf("inline workflow: %w", err)
+		}
 	}
 	if s.Blocking {
 		if s.EffectiveMode() != ModeSync {

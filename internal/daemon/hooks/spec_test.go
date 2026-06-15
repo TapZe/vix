@@ -3,9 +3,21 @@ package hooks
 import (
 	"testing"
 	"time"
+
+	"github.com/get-vix/vix/internal/workflow"
 )
 
 func boolPtr(b bool) *bool { return &b }
+
+// validInlineWorkflow returns a minimal structurally-valid workflow definition
+// for exercising the inline-workflow path.
+func validInlineWorkflow() *workflow.Def {
+	return &workflow.Def{
+		Name:       "inline",
+		EntryPoint: workflow.StepRef{ID: "s"},
+		Steps:      map[string]workflow.StepDef{"s": {Type: "bash", Command: "true"}},
+	}
+}
 
 func TestValidate(t *testing.T) {
 	cases := []struct {
@@ -14,13 +26,17 @@ func TestValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{"ok command", Spec{ID: "a", Trigger: HookTrigger{Event: EventPreToolUse}, Command: "true"}, false},
-		{"ok workflow", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Workflow: "wf"}, false},
+		{"ok workflow_id", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, WorkflowID: "wf"}, false},
+		{"ok inline workflow", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Workflow: validInlineWorkflow()}, false},
 		{"ok prompt", Spec{ID: "a", Trigger: HookTrigger{Event: EventSessionStart}, Prompt: "hi"}, false},
 		{"missing id", Spec{Trigger: HookTrigger{Event: EventPreToolUse}, Command: "true"}, true},
 		{"missing event", Spec{ID: "a", Command: "true"}, true},
 		{"unknown event", Spec{ID: "a", Trigger: HookTrigger{Event: "Nope"}, Command: "true"}, true},
 		{"no action", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}}, true},
 		{"two actions", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Command: "x", Prompt: "y"}, true},
+		{"workflow_id and inline both", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, WorkflowID: "wf", Workflow: validInlineWorkflow()}, true},
+		{"command and workflow_id", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Command: "x", WorkflowID: "wf"}, true},
+		{"invalid inline workflow", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Workflow: &workflow.Def{Name: "x"}}, true},
 		{"invalid mode", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Command: "x", Mode: "weird"}, true},
 		{"blocking needs sync", Spec{ID: "a", Trigger: HookTrigger{Event: EventPreToolUse}, Command: "x", Blocking: true}, true},
 		{"blocking async rejected", Spec{ID: "a", Trigger: HookTrigger{Event: EventPreToolUse}, Command: "x", Blocking: true, Mode: ModeAsync}, true},

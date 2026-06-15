@@ -598,7 +598,7 @@ func (s *Session) Run() {
 				s.lastRequestAt = time.Now()
 				var data protocol.SessionWorkflowData
 				json.Unmarshal(cmd.Data, &data)
-				s.handleWorkflowCommand(data.Name, data.Text)
+				s.handleWorkflowCommand(data.Name, data.Text, data.Workflow)
 			case "session.set_model":
 				var data protocol.SessionSetModelData
 				json.Unmarshal(cmd.Data, &data)
@@ -910,6 +910,24 @@ func (s *Session) setWorkflows(wfs []*WorkflowDef) {
 	s.workflowsMu.Lock()
 	s.workflows = wfs
 	s.workflowsMu.Unlock()
+}
+
+// registerInlineWorkflow adds an inline workflow definition to the session's
+// workflow set, replacing any existing entry of the same name. Used by job and
+// hook runs that carry a self-contained workflow rather than referencing one
+// loaded from config/workflow.json, so the normal name-lookup path can resolve
+// it. Called from inside the session goroutine (handleWorkflowCommand), so it
+// is race-free with Run()'s initial workflow load.
+func (s *Session) registerInlineWorkflow(def *WorkflowDef) {
+	s.workflowsMu.Lock()
+	defer s.workflowsMu.Unlock()
+	for i, w := range s.workflows {
+		if w.Name == def.Name {
+			s.workflows[i] = def
+			return
+		}
+	}
+	s.workflows = append(s.workflows, def)
 }
 
 // ReloadWorkflows swaps in a freshly-loaded workflow list and re-emits
@@ -2562,15 +2580,41 @@ func providerFor(model string) string {
 	return "openai"
 }
 
-// handleWorkflowCommand handles a session.workflow command by looking up and executing
-// the workflow matching the given name.
-func (s *Session) handleWorkflowCommand(name, text string) {
+// handleWorkflowCommand handles a session.workflow command by looking up and
+// executing the workflow matching the given name. When inline is non-empty it
+// carries a self-contained workflow definition (a workflow.Def as JSON) which
+// is registered into the session's workflow set first, then resolved by its own
+// name through the normal lookup below.
+func (s *Session) handleWorkflowCommand(name, text string, inline json.RawMessage) {
 	// Unconfigured session: no usable LLM client. Workflows stream too, so
 	// refuse before doing any work and surface the error to the UI.
 	if s.configErr != nil {
 		s.emit("event.error", protocol.EventError{Message: s.unconfiguredMessage()})
 		s.emit("event.agent_done", nil)
 		return
+	}
+
+	// Inline workflow: validate and register it transiently, then fall through
+	// to the by-name lookup (using the def's own name). Registering here, inside
+	// the session goroutine, is race-free with Run()'s initial workflow load.
+	if len(inline) > 0 {
+		var def WorkflowDef
+		if err := json.Unmarshal(inline, &def); err != nil {
+			msg := fmt.Sprintf("invalid inline workflow: %v", err)
+			log.Printf("[session] %s", msg)
+			s.emit("event.error", protocol.EventError{Message: msg})
+			s.emit("event.agent_done", nil)
+			return
+		}
+		if err := validateWorkflow(&def); err != nil {
+			msg := fmt.Sprintf("invalid inline workflow: %v", err)
+			log.Printf("[session] %s", msg)
+			s.emit("event.error", protocol.EventError{Message: msg})
+			s.emit("event.agent_done", nil)
+			return
+		}
+		s.registerInlineWorkflow(&def)
+		name = def.Name
 	}
 
 	var wf *WorkflowDef

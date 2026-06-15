@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/get-vix/vix/internal/workflow"
 )
 
 func validSpec(id string) Spec {
@@ -17,6 +19,16 @@ func validSpec(id string) Spec {
 		Trigger: Trigger{Type: "cron", Expr: "@every 1m"},
 		Prompt:  "do the thing",
 		CWD:     "/tmp",
+	}
+}
+
+// validInlineWorkflow returns a minimal structurally-valid workflow definition
+// for exercising the inline-workflow path.
+func validInlineWorkflow() *workflow.Def {
+	return &workflow.Def{
+		Name:       "inline",
+		EntryPoint: workflow.StepRef{ID: "s"},
+		Steps:      map[string]workflow.StepDef{"s": {Type: "bash", Command: "true"}},
 	}
 }
 
@@ -43,6 +55,10 @@ func TestSpecValidate(t *testing.T) {
 		{"bad timeout", func(s *Spec) { s.Timeout = "ten minutes" }, true},
 		{"negative timeout", func(s *Spec) { s.Timeout = "-5m" }, true},
 		{"good timeout", func(s *Spec) { s.Timeout = "90s" }, false},
+		{"workflow_id only", func(s *Spec) { s.WorkflowID = "review" }, false},
+		{"inline workflow only", func(s *Spec) { s.Workflow = validInlineWorkflow() }, false},
+		{"workflow_id and inline both", func(s *Spec) { s.WorkflowID = "review"; s.Workflow = validInlineWorkflow() }, true},
+		{"invalid inline workflow", func(s *Spec) { s.Workflow = &workflow.Def{Name: "broken"} }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

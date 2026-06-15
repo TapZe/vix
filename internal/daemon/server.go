@@ -343,7 +343,7 @@ func seedDefaultHeartbeat(jobsDir, heartbeatPath string) {
 		Prompt: "$(file:.vix/heartbeat.md)\n\n" +
 			"Follow it strictly. Do not infer tasks from prior conversations. " +
 			"If nothing needs attention, reply HEARTBEAT_OK.",
-		Workflow:    "heartbeat",
+		WorkflowID:  "heartbeat",
 		CWD:         home,
 		SkipIfEmpty: true,
 		Timeout:     "10m",

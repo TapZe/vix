@@ -13,6 +13,8 @@ import (
 	"time"
 
 	cron "github.com/robfig/cron/v3"
+
+	"github.com/get-vix/vix/internal/workflow"
 )
 
 // DefaultTimeout bounds a job run's wall-clock time when the spec does not set
@@ -48,17 +50,22 @@ type Permissions struct {
 // ~/.vix/jobs/. Mutable runtime state lives separately (State) so these files
 // never churn.
 type Spec struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name,omitempty"`
-	Enabled     bool        `json:"enabled"`
-	Trigger     Trigger     `json:"trigger"`
-	Prompt      string      `json:"prompt"`             // required; supports $(file:path)
-	Workflow    string      `json:"workflow,omitempty"` // empty = plain chat turn with the general agent
-	CWD         string      `json:"cwd,omitempty"`
-	Permissions Permissions `json:"permissions,omitempty"`
-	SkipIfEmpty bool        `json:"skip_if_empty,omitempty"`
-	Timeout     string      `json:"timeout,omitempty"` // Go duration, default 10m
-	CreatedBy   string      `json:"created_by,omitempty"`
+	ID      string  `json:"id"`
+	Name    string  `json:"name,omitempty"`
+	Enabled bool    `json:"enabled"`
+	Trigger Trigger `json:"trigger"`
+	Prompt  string  `json:"prompt"` // required; supports $(file:path)
+	// At most one of WorkflowID / Workflow may be set:
+	//   - WorkflowID names a workflow defined in config/workflow.json.
+	//   - Workflow is a self-contained inline definition (no separate file).
+	// Both empty = plain chat turn with the general agent.
+	WorkflowID  string        `json:"workflow_id,omitempty"`
+	Workflow    *workflow.Def `json:"workflow,omitempty"`
+	CWD         string        `json:"cwd,omitempty"`
+	Permissions Permissions   `json:"permissions,omitempty"`
+	SkipIfEmpty bool          `json:"skip_if_empty,omitempty"`
+	Timeout     string        `json:"timeout,omitempty"` // Go duration, default 10m
+	CreatedBy   string        `json:"created_by,omitempty"`
 }
 
 // Validate reports the first problem with the spec, or nil.
@@ -71,6 +78,17 @@ func (s *Spec) Validate() error {
 	}
 	if s.CWD == "" {
 		return fmt.Errorf("missing cwd")
+	}
+	// At most one of workflow_id / workflow; an inline workflow must itself be
+	// structurally valid (named, with consistent steps) so problems surface at
+	// load time rather than mid-run.
+	if s.WorkflowID != "" && s.Workflow != nil {
+		return fmt.Errorf("set only one of workflow_id or workflow, not both")
+	}
+	if s.Workflow != nil {
+		if err := workflow.Validate(s.Workflow); err != nil {
+			return fmt.Errorf("inline workflow: %w", err)
+		}
 	}
 	switch s.Trigger.Type {
 	case "cron":
