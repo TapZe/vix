@@ -402,8 +402,10 @@ func SetClosedSessionRetentionMinutes(v int) error {
 
 // ThemeConfig holds user-configurable brand colors.
 type ThemeConfig struct {
-	Primary   string `json:"primary"`   // hex color like "#BC63FC"
-	Secondary string `json:"secondary"` // hex color like "#A3FC63"
+	Primary    string `json:"primary"`    // hex color like "#BC63FC"
+	Secondary  string `json:"secondary"`  // hex color like "#A3FC63"
+	Tertiary   string `json:"tertiary"`   // hex color like "#FC6F63"
+	Quaternary string `json:"quaternary"` // hex color like "#63F0FC"
 }
 
 // ElevenLabsAgentID reads the elevenlabs.agent_id from the layered settings
@@ -480,6 +482,12 @@ func LoadThemeConfig(paths VixPaths) ThemeConfig {
 		}
 		if wrapper.Theme.Secondary != "" {
 			tc.Secondary = wrapper.Theme.Secondary
+		}
+		if wrapper.Theme.Tertiary != "" {
+			tc.Tertiary = wrapper.Theme.Tertiary
+		}
+		if wrapper.Theme.Quaternary != "" {
+			tc.Quaternary = wrapper.Theme.Quaternary
 		}
 	}
 
