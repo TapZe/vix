@@ -200,6 +200,21 @@ func (s *Session) userPromptSubmitHook(ctx context.Context, text string) (newTex
 	return text, "", false
 }
 
+// announceStart rebuilds the resumed client's viewport and fires SessionStart
+// hooks, classified by source. The resume check must be captured before
+// emitReplay runs, because emitReplay clears attachRecord — reordering these
+// would misclassify every resumed session as "startup" (and inflate any
+// startup-gated hook, e.g. the feedback counter).
+func (s *Session) announceStart() {
+	resumed := s.attachRecord != nil
+	s.emitReplay()
+	source := "startup"
+	if resumed {
+		source = "resume"
+	}
+	s.fireSessionStart(source)
+}
+
 // fireSessionStart fires SessionStart hooks (observational, fire-and-forget).
 func (s *Session) fireSessionStart(source string) {
 	if !s.hooksActive(hooks.EventSessionStart) {

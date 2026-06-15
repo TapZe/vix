@@ -308,20 +308,20 @@ func (s *Server) EnableHooks() {
 	if dir == "" {
 		return
 	}
-	// Seed the shipped default hooks the first time the directory is created
-	// (mirrors the heartbeat job: users may then edit/disable/delete freely and
-	// it never comes back). Skipped on an auth-enabled daemon, where the
-	// feedback hook's `vix session create` callback can't present the secret.
-	firstCreate := false
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		firstCreate = true
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		LogError("hooks: cannot create %s: %v", dir, err)
 		return
 	}
-	if firstCreate && s.authToken == "" {
-		seedDefaultFeedbackHook(dir)
+	// Seed the shipped default feedback hook once, tracked by a sentinel file
+	// (not directory existence) so the hook's own state dir can be pre-created
+	// without suppressing the seed, and so it never resurrects after the user
+	// edits/disables/deletes it. Skipped on an auth-enabled daemon, where the
+	// feedback hook's `vix session create` callback can't present the secret.
+	if s.authToken == "" {
+		sentinel := filepath.Join(dir, feedbackSeedSentinel)
+		if _, err := os.Stat(sentinel); os.IsNotExist(err) {
+			seedDefaultFeedbackHook(dir)
+		}
 	}
 	s.hookRegistry = hooks.NewRegistry(hooks.NewStore(dir))
 }
@@ -961,6 +961,16 @@ func (s *Server) Jobs() []jobs.JobSnapshot {
 		return []jobs.JobSnapshot{}
 	}
 	return s.jobScheduler.Snapshot()
+}
+
+// Hooks returns a snapshot of the lifecycle hooks for external consumers (the
+// web UI). Empty when the hooks engine is disabled (no home directory / feature
+// off).
+func (s *Server) Hooks() []hooks.HookSnapshot {
+	if s.hookRegistry == nil {
+		return []hooks.HookSnapshot{}
+	}
+	return s.hookRegistry.Snapshot()
 }
 
 // getSession returns the live session with the given ID, or nil if not found.

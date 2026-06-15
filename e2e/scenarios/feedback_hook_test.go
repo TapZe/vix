@@ -12,15 +12,14 @@ import (
 )
 
 // Feedback-hook e2e scenarios. vixd seeds a shipped SessionStart hook
-// (feedback-at-10) the first time the hooks directory is created. It counts
+// (feedback-at-10) the first time it runs (tracked by a sentinel). It counts
 // fresh sessions and, on the 10th, opens a one-time "Vix-initiated" conversation
 // by calling back into the daemon via `vix session create` — exercising the
 // vix_bin/socket_path hook-context fields end to end.
 //
 // To control the threshold without driving 10 real sessions, each test seeds
-// ~/.vix/feedback/count.log. Crucially it must NOT seed anything under
-// ~/.vix/hooks (that would suppress the daemon's one-time seed), so the hook is
-// the real shipped artifact under test.
+// the hook's counter at ~/.vix/hooks/feedback/count.log. The seed sentinel is
+// NOT pre-written, so the daemon still seeds the real shipped hook under test.
 
 const feedbackTitle = "vix needs your feedback"
 
@@ -63,7 +62,7 @@ func feedbackSessions(h *harness.Harness) []feedbackRec {
 
 // countLogLines returns the number of recorded sessions in the feedback counter.
 func countLogLines(h *harness.Harness) int {
-	b, err := os.ReadFile(h.HomePath(".vix/feedback/count.log"))
+	b, err := os.ReadFile(h.HomePath(".vix/hooks/feedback/count.log"))
 	if err != nil {
 		return 0
 	}
@@ -79,7 +78,7 @@ func TestFeedbackHookFiresAtThreshold(t *testing.T) {
 		Subcategory: "hooks.feedback_fires",
 		Description: "after 10 fresh sessions the seeded hook opens a one-time feedback conversation via `vix session create`",
 		Wire:        harness.WireMessages,
-	}, harness.WithHomeFile(".vix/feedback/count.log", strings.Repeat("1\n", 9)))
+	}, harness.WithHomeFile(".vix/hooks/feedback/count.log", strings.Repeat("1\n", 9)))
 
 	h.UI.WaitStable(400 * time.Millisecond)
 	h.UI.Shot("feedback-threshold")
@@ -92,7 +91,7 @@ func TestFeedbackHookFiresAtThreshold(t *testing.T) {
 		!strings.Contains(recs[0].Messages[0].Content[0].Text, "forms.gle/ADEVrtP2xRsKpxtdA") {
 		t.Fatalf("feedback message missing the form link: %+v", recs[0].Messages)
 	}
-	if _, err := os.Stat(h.HomePath(".vix/feedback/asked")); err != nil {
+	if _, err := os.Stat(h.HomePath(".vix/hooks/feedback/asked")); err != nil {
 		t.Fatalf("once-only marker not written: %v", err)
 	}
 }
@@ -107,8 +106,8 @@ func TestFeedbackHookFiresOnlyOnce(t *testing.T) {
 		Description: "with the once-only marker already present, crossing the threshold again delivers nothing",
 		Wire:        harness.WireMessages,
 	},
-		harness.WithHomeFile(".vix/feedback/count.log", strings.Repeat("1\n", 12)),
-		harness.WithHomeFile(".vix/feedback/asked", ""),
+		harness.WithHomeFile(".vix/hooks/feedback/count.log", strings.Repeat("1\n", 12)),
+		harness.WithHomeFile(".vix/hooks/feedback/asked", ""),
 	)
 
 	h.UI.WaitStable(400 * time.Millisecond)
@@ -132,7 +131,7 @@ func TestFeedbackHookBelowThreshold(t *testing.T) {
 		Subcategory: "hooks.feedback_below",
 		Description: "below the threshold the hook counts the session but delivers nothing",
 		Wire:        harness.WireMessages,
-	}, harness.WithHomeFile(".vix/feedback/count.log", strings.Repeat("1\n", 3)))
+	}, harness.WithHomeFile(".vix/hooks/feedback/count.log", strings.Repeat("1\n", 3)))
 
 	h.UI.WaitStable(400 * time.Millisecond)
 
@@ -143,7 +142,7 @@ func TestFeedbackHookBelowThreshold(t *testing.T) {
 	if n := len(feedbackSessions(h)); n != 0 {
 		t.Fatalf("delivered %d feedback conversation(s) below threshold, want 0", n)
 	}
-	if _, err := os.Stat(h.HomePath(".vix/feedback/asked")); err == nil {
+	if _, err := os.Stat(h.HomePath(".vix/hooks/feedback/asked")); err == nil {
 		t.Fatal("once-only marker written below threshold")
 	}
 }

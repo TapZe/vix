@@ -60,6 +60,21 @@ func TestSeedDefaultFeedbackHook(t *testing.T) {
 	if !strings.Contains(string(msg), "forms.gle/ADEVrtP2xRsKpxtdA") {
 		t.Error("message.md missing the feedback form link")
 	}
+
+	// Sentinel written so seeding runs at most once.
+	if _, err := os.Stat(filepath.Join(dir, feedbackSeedSentinel)); err != nil {
+		t.Fatalf("seed sentinel not written: %v", err)
+	}
+
+	// Re-seeding must not clobber a user's edited/disabled artifacts.
+	edited := []byte(`{"id":"feedback-at-10","enabled":false}`)
+	if err := os.WriteFile(filepath.Join(dir, feedbackHookID+".json"), edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedDefaultFeedbackHook(dir)
+	if got, _ := os.ReadFile(filepath.Join(dir, feedbackHookID+".json")); string(got) != string(edited) {
+		t.Errorf("re-seed clobbered edited spec: got %s", got)
+	}
 }
 
 func TestBuildHookContextIncludesVixBinAndSocket(t *testing.T) {
@@ -153,6 +168,8 @@ func TestFeedbackScriptCountsAndFiresOnce(t *testing.T) {
 	}
 	scriptPath, fakeVix, callLog := writeFeedbackFixtures(t)
 	home := t.TempDir()
+	// State now lives next to the script (the hook's own feedback/ dir).
+	feedbackDir := filepath.Join(filepath.Dir(scriptPath), "feedback")
 
 	// Runs 1..9: below threshold, nothing delivered.
 	for i := 1; i <= 9; i++ {
@@ -161,7 +178,7 @@ func TestFeedbackScriptCountsAndFiresOnce(t *testing.T) {
 	if n := countCalls(t, callLog); n != 0 {
 		t.Fatalf("delivered %d times before threshold, want 0", n)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".vix/feedback/asked")); err == nil {
+	if _, err := os.Stat(filepath.Join(feedbackDir, "asked")); err == nil {
 		t.Fatal("asked marker created before threshold")
 	}
 
@@ -190,7 +207,7 @@ func TestFeedbackScriptConcurrentFiresOnce(t *testing.T) {
 	}
 	scriptPath, fakeVix, callLog := writeFeedbackFixtures(t)
 	home := t.TempDir()
-	feedbackDir := filepath.Join(home, ".vix/feedback")
+	feedbackDir := filepath.Join(filepath.Dir(scriptPath), "feedback")
 	if err := os.MkdirAll(feedbackDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

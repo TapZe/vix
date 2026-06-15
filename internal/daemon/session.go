@@ -578,16 +578,10 @@ func (s *Session) Run() {
 
 	s.initBrain()
 
-	// Attached (resumed) session: rebuild the client's viewport and apply
-	// restore-time validation now that the model and workflows are resolved.
-	s.emitReplay()
-
-	// SessionStart hooks (observational): fire once the session is ready.
-	startSource := "startup"
-	if s.attachRecord != nil {
-		startSource = "resume"
-	}
-	s.fireSessionStart(startSource)
+	// Rebuild the client's viewport (for resumes) and fire the SessionStart
+	// hooks, classified as startup vs resume. Must run as one unit: emitReplay
+	// clears attachRecord, so the resume check has to be captured before it.
+	s.announceStart()
 
 	for {
 		select {

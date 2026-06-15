@@ -10,6 +10,7 @@ import (
 
 	"github.com/get-vix/vix/internal/daemon/hooks"
 	"github.com/get-vix/vix/internal/daemon/llm"
+	"github.com/get-vix/vix/internal/protocol"
 )
 
 // newHookSession builds a Session whose server carries a hook registry loaded
@@ -39,6 +40,57 @@ func writeHookSpec(t *testing.T, dir, name, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestAnnounceStart_SourceClassification pins the regression where emitReplay
+// (which clears attachRecord) ran before the SessionStart source was computed,
+// so every resumed session fired as "startup" — wrongly tripping startup-gated
+// hooks like the feedback counter. A fresh session must fire only the "startup"
+// hook; a resumed session must fire only the "resume" hook.
+func TestAnnounceStart_SourceClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		resume bool
+		want   string
+		absent string
+	}{
+		{"fresh session fires startup", false, "startup.flag", "resume.flag"},
+		{"resumed session fires resume", true, "resume.flag", "startup.flag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hd := t.TempDir()
+			writeHookSpec(t, hd, "startup.json", `{"id":"startup","enabled":true,"mode":"async","trigger":{"event":"SessionStart","matcher":"startup"},"command":"touch startup.flag"}`)
+			writeHookSpec(t, hd, "resume.json", `{"id":"resume","enabled":true,"mode":"async","trigger":{"event":"SessionStart","matcher":"resume"},"command":"touch resume.flag"}`)
+
+			cwd := t.TempDir()
+			s := newHookSession(t, cwd, hd, "")
+			s.eventChan = make(chan protocol.SessionEvent, 4)
+			s.ctx, s.cancel = context.WithCancel(context.Background())
+			defer s.cancel()
+			if tc.resume {
+				s.attachRecord = &sessionRecord{ID: "r1", SessionMode: "chat"}
+			}
+
+			s.announceStart()
+
+			// Async hooks fire in goroutines; poll for the expected marker.
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := os.Stat(filepath.Join(cwd, tc.want)); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if _, err := os.Stat(filepath.Join(cwd, tc.want)); err != nil {
+				t.Fatalf("expected %s (the %q hook should have fired)", tc.want, strings.TrimSuffix(tc.want, ".flag"))
+			}
+			// The other source's hook started concurrently; by now its marker
+			// would exist too if it had wrongly matched.
+			if _, err := os.Stat(filepath.Join(cwd, tc.absent)); err == nil {
+				t.Fatalf("%s should not exist (wrong-source hook fired)", tc.absent)
+			}
+		})
 	}
 }
 
