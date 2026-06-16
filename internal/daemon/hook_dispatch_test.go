@@ -198,3 +198,113 @@ func TestDispatch_PreToolUseDenyShortCircuits(t *testing.T) {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 }
+
+// waitForFlag polls for a marker file written by an async command hook.
+func waitForFlag(t *testing.T, dir, name string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected marker %s to be created", name)
+}
+
+// TestSubagentHooks_FireStartAndStop proves SubagentStart/SubagentStop fire with
+// the agent type as the matcher field, and that a hook scoped to a different
+// agent type does not fire.
+func TestSubagentHooks_FireStartAndStop(t *testing.T) {
+	hd := t.TempDir()
+	writeHookSpec(t, hd, "sa-start.json", `{"id":"sa-start","enabled":true,"mode":"async","trigger":{"event":"SubagentStart","matcher":"general"},"command":"touch start.flag"}`)
+	writeHookSpec(t, hd, "sa-stop.json", `{"id":"sa-stop","enabled":true,"mode":"async","trigger":{"event":"SubagentStop","matcher":"general"},"command":"touch stop.flag"}`)
+	writeHookSpec(t, hd, "sa-other.json", `{"id":"sa-other","enabled":true,"mode":"async","trigger":{"event":"SubagentStart","matcher":"reviewer"},"command":"touch other.flag"}`)
+
+	cwd := t.TempDir()
+	s := newHookSession(t, cwd, hd, "")
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	defer s.cancel()
+
+	s.fireSubagentStart("general", "task_1", "do work")
+	s.fireSubagentStop("general", "task_1", &SubagentResult{Output: "done"})
+
+	waitForFlag(t, cwd, "start.flag")
+	waitForFlag(t, cwd, "stop.flag")
+	if _, err := os.Stat(filepath.Join(cwd, "other.flag")); err == nil {
+		t.Fatal("a reviewer-matched SubagentStart fired for a general subagent")
+	}
+}
+
+// TestSubagentHooks_RecursionGuard confirms a vix-origin session (a hook/job
+// run) does not fire subagent hooks.
+func TestSubagentHooks_RecursionGuard(t *testing.T) {
+	hd := t.TempDir()
+	writeHookSpec(t, hd, "sa-start.json", `{"id":"sa-start","enabled":true,"mode":"async","trigger":{"event":"SubagentStart"},"command":"touch start.flag"}`)
+	cwd := t.TempDir()
+	s := newHookSession(t, cwd, hd, "vix")
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	defer s.cancel()
+
+	s.fireSubagentStart("general", "task_1", "do work")
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(cwd, "start.flag")); err == nil {
+		t.Fatal("vix-origin sessions must not fire subagent hooks (recursion guard)")
+	}
+}
+
+// TestPermissionRequestHook_BlockingDeny proves a blocking PermissionRequest
+// hook denies the confirmation with its reason, and is scoped by tool name.
+func TestPermissionRequestHook_BlockingDeny(t *testing.T) {
+	hd := t.TempDir()
+	writeHookSpec(t, hd, "perm.json", `{"id":"perm","enabled":true,"mode":"sync","blocking":true,"trigger":{"event":"PermissionRequest","matcher":"write_file"},"command":"echo no-writes >&2; exit 2"}`)
+	s := newHookSession(t, t.TempDir(), hd, "")
+
+	reason, denied := s.permissionRequestHook(context.Background(), "write_file", map[string]any{"path": "x"}, nil)
+	if !denied {
+		t.Fatal("expected permission to be denied by hook")
+	}
+	if reason != "no-writes" {
+		t.Fatalf("reason = %q, want no-writes", reason)
+	}
+	if _, denied := s.permissionRequestHook(context.Background(), "bash", map[string]any{}, nil); denied {
+		t.Fatal("bash should not be denied (matcher is write_file)")
+	}
+}
+
+// TestPermissionRequestHook_NonBlockingDowngraded proves a non-blocking sync
+// PermissionRequest hook cannot deny (its veto is downgraded).
+func TestPermissionRequestHook_NonBlockingDowngraded(t *testing.T) {
+	hd := t.TempDir()
+	writeHookSpec(t, hd, "perm.json", `{"id":"perm","enabled":true,"mode":"sync","trigger":{"event":"PermissionRequest","matcher":"write_file"},"command":"echo nope >&2; exit 2"}`)
+	s := newHookSession(t, t.TempDir(), hd, "")
+	if _, denied := s.permissionRequestHook(context.Background(), "write_file", map[string]any{"path": "x"}, nil); denied {
+		t.Fatal("a non-blocking permission hook must not deny")
+	}
+}
+
+// TestCompactionHooks_FireWithTrigger proves PreCompact and PostCompact fire
+// through compactMessages with the trigger ("auto"/"manual") as the matcher
+// field, and that PostCompact only fires on a successful compaction.
+func TestCompactionHooks_FireWithTrigger(t *testing.T) {
+	hd := t.TempDir()
+	writeHookSpec(t, hd, "pre.json", `{"id":"pre","enabled":true,"mode":"async","trigger":{"event":"PreCompact","matcher":"auto"},"command":"touch pre.flag"}`)
+	writeHookSpec(t, hd, "post.json", `{"id":"post","enabled":true,"mode":"async","trigger":{"event":"PostCompact","matcher":"auto"},"command":"touch post.flag"}`)
+	writeHookSpec(t, hd, "manual.json", `{"id":"manual","enabled":true,"mode":"async","trigger":{"event":"PreCompact","matcher":"manual"},"command":"touch manual.flag"}`)
+
+	fake := &fakeCompactionLLM{summary: "SUMMARY"}
+	s, _ := newCompactionTestSession(t, fake)
+	cwd := t.TempDir()
+	s.cwd = cwd
+	srv := &Server{handlers: make(map[string]HandlerFunc), serverCtx: context.Background()}
+	srv.hookRegistry = hooks.NewRegistry(hooks.NewStore(hd))
+	s.server = srv
+
+	s.compactMessages(4, 1, true) // auto compaction
+
+	waitForFlag(t, cwd, "pre.flag")
+	waitForFlag(t, cwd, "post.flag")
+	if _, err := os.Stat(filepath.Join(cwd, "manual.flag")); err == nil {
+		t.Fatal("a manual-matched PreCompact fired for an auto compaction")
+	}
+}

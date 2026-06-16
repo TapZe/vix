@@ -45,6 +45,14 @@ func TestValidate(t *testing.T) {
 		{"bad matcher regex", Spec{ID: "a", Trigger: HookTrigger{Event: EventPreToolUse, Matcher: "("}, Command: "x"}, true},
 		{"bad timeout", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Command: "x", Timeout: "nope"}, true},
 		{"negative timeout", Spec{ID: "a", Trigger: HookTrigger{Event: EventStop}, Command: "x", Timeout: "-1s"}, true},
+		{"ok precompact", Spec{ID: "a", Trigger: HookTrigger{Event: EventPreCompact}, Command: "true"}, false},
+		{"ok postcompact", Spec{ID: "a", Trigger: HookTrigger{Event: EventPostCompact}, Command: "true"}, false},
+		{"ok subagent start", Spec{ID: "a", Trigger: HookTrigger{Event: EventSubagentStart}, Command: "true"}, false},
+		{"ok subagent stop", Spec{ID: "a", Trigger: HookTrigger{Event: EventSubagentStop}, Command: "true"}, false},
+		{"ok permission request", Spec{ID: "a", Trigger: HookTrigger{Event: EventPermissionRequest}, Command: "true"}, false},
+		{"permission request may block", Spec{ID: "a", Trigger: HookTrigger{Event: EventPermissionRequest}, Command: "x", Blocking: true, Mode: ModeSync}, false},
+		{"subagent stop cannot block", Spec{ID: "a", Trigger: HookTrigger{Event: EventSubagentStop}, Command: "x", Blocking: true, Mode: ModeSync}, true},
+		{"precompact cannot block", Spec{ID: "a", Trigger: HookTrigger{Event: EventPreCompact}, Command: "x", Blocking: true, Mode: ModeSync}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

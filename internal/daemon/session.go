@@ -2084,6 +2084,12 @@ func (s *Session) compactMessages(keepFromMsgIdx, summarizedTurns int, auto bool
 	fromTokens := s.lastInputTokens
 	s.mu.Unlock()
 
+	trigger := "manual"
+	if auto {
+		trigger = "auto"
+	}
+	s.firePreCompact(trigger)
+
 	summary, err := s.summarizeMessages(dropped)
 	if err != nil {
 		s.emit("event.error", protocol.EventError{Message: "Compaction failed: " + err.Error()})
@@ -2132,6 +2138,8 @@ func (s *Session) compactMessages(keepFromMsgIdx, summarizedTurns int, auto bool
 		SummarizedTurns: summarizedTurns,
 		Auto:            auto,
 	})
+
+	s.firePostCompact(trigger, summarizedTurns, fromTokens)
 }
 
 // summarizeMessages runs a one-shot, tool-free LLM call to summarize the given
@@ -2214,6 +2222,11 @@ type dispatchOptions struct {
 	// afterTool, when set, fires PostToolUse hooks after a tool completes,
 	// possibly appending context to the result. Nil for subagents.
 	afterTool func(ctx context.Context, name string, input map[string]any, result *ToolResult)
+	// permissionRequest, when set, fires PermissionRequest hooks just before the
+	// user is asked to confirm a tool call. A deny short-circuits the prompt and
+	// rejects the tool with the returned reason. Only wired for the main session
+	// dispatcher; nil for subagents.
+	permissionRequest func(ctx context.Context, name string, input map[string]any) (denyReason string, denied bool)
 	// toolTimeoutDefault is the floor for tool-call timeouts used by the
 	// TimeoutSec field of emitted tool_call events. When zero, falls back to
 	// the package-level defaultToolTimeoutDefault constant.
@@ -2524,6 +2537,13 @@ func resolveConfirmation(ctx context.Context, t *toolTask, opts dispatchOptions)
 	if opts.confirmFn == nil {
 		return &ToolResult{Output: "Permission denied.", IsError: true}
 	}
+	// PermissionRequest hooks run before the user is prompted: a deny skips the
+	// prompt entirely and rejects the tool with the hook's reason.
+	if opts.permissionRequest != nil {
+		if reason, denied := opts.permissionRequest(ctx, t.toolUse.Name, t.input); denied {
+			return &ToolResult{Output: "Permission denied by hook: " + reason, IsError: true}
+		}
+	}
 	approved, cancelled := opts.confirmFn(ctx, t.toolUse.Name, t.input)
 	if cancelled {
 		return &ToolResult{Output: "Cancelled", IsError: true}
@@ -2552,6 +2572,13 @@ func (s *Session) sessionDispatchToolCalls(ctx context.Context, msg *llm.Message
 		},
 		beforeTool: s.preToolUseHook,
 		afterTool:  s.postToolUseHook,
+		permissionRequest: func(ctx context.Context, name string, input map[string]any) (string, bool) {
+			var requestedDirs []string
+			if rd, ok := input["_requested_dirs"].([]string); ok {
+				requestedDirs = rd
+			}
+			return s.permissionRequestHook(ctx, name, input, requestedDirs)
+		},
 		handleSpecial: func(ctx context.Context, name string, input map[string]any) (*ToolResult, bool) {
 			switch name {
 			case "ask_question_to_user":
@@ -2789,6 +2816,18 @@ func (s *Session) handleSpawnAgent(ctx context.Context, input map[string]any) (s
 		}
 		bgDef, bgMax := s.toolTimeoutBounds()
 		taskID := s.backgroundTasks.SpawnBackground(bgCtx, config, prompt, cred, parentModel, s.server.plugins, bgExecuteTool, s.cwd, bgDef, bgMax, s.searchDirsSlice()...)
+		s.fireSubagentStart(agentType, taskID, prompt)
+		// Fire SubagentStop when the background task completes, bound to the
+		// session context so it never outlives the session.
+		if task, ok := s.backgroundTasks.Load(taskID); ok {
+			go func() {
+				select {
+				case <-task.Done:
+					s.fireSubagentStop(agentType, taskID, task.Result)
+				case <-s.ctx.Done():
+				}
+			}()
+		}
 		s.emit("event.tool_result", protocol.EventToolResult{
 			Name:   "spawn_agent",
 			Output: fmt.Sprintf("Background task started. Task ID: %s", taskID),
@@ -2803,7 +2842,10 @@ func (s *Session) handleSpawnAgent(ctx context.Context, input map[string]any) (s
 	}
 	log.Printf("[subagent] spawning foreground agent (type=%s)", config.Name)
 	def, maxv := s.toolTimeoutBounds()
+	agentID := nextTaskID()
+	s.fireSubagentStart(agentType, agentID, prompt)
 	result, err := RunSubagent(ctx, config, prompt, cred, parentModel, s.server.plugins, executeTool, s.cwd, s.emitHooks(), def, maxv, s.searchDirsSlice()...)
+	s.fireSubagentStop(agentType, agentID, result)
 
 	if err != nil {
 		return fmt.Sprintf("Subagent error: %v", err), true

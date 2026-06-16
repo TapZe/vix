@@ -238,3 +238,110 @@ func (s *Session) fireStop() {
 		s.server.fireAsyncHook(h, base)
 	}
 }
+
+// fireSubagentStart fires SubagentStart hooks when a subagent is spawned
+// (observational, fire-and-forget). agentID correlates this fire with the
+// matching SubagentStop; agentType is the matcher field.
+func (s *Session) fireSubagentStart(agentType, agentID, prompt string) {
+	if !s.hooksActive(hooks.EventSubagentStart) {
+		return
+	}
+	syncHooks, asyncHooks := s.hooksReg().Match(hooks.EventSubagentStart, agentType)
+	base := s.buildHookContext(hooks.EventSubagentStart, map[string]any{
+		"agent_type": agentType,
+		"agent_id":   agentID,
+		"prompt":     prompt,
+	})
+	for _, h := range append(syncHooks, asyncHooks...) {
+		s.server.fireAsyncHook(h, base)
+	}
+}
+
+// fireSubagentStop fires SubagentStop hooks when a subagent finishes
+// (observational, fire-and-forget). result is nil when the subagent produced
+// none (e.g. an early error).
+func (s *Session) fireSubagentStop(agentType, agentID string, result *SubagentResult) {
+	if !s.hooksActive(hooks.EventSubagentStop) {
+		return
+	}
+	syncHooks, asyncHooks := s.hooksReg().Match(hooks.EventSubagentStop, agentType)
+	extra := map[string]any{
+		"agent_type": agentType,
+		"agent_id":   agentID,
+	}
+	if result != nil {
+		extra["result"] = result.Output
+		extra["is_error"] = result.IsError
+	}
+	base := s.buildHookContext(hooks.EventSubagentStop, extra)
+	for _, h := range append(syncHooks, asyncHooks...) {
+		s.server.fireAsyncHook(h, base)
+	}
+}
+
+// firePreCompact fires PreCompact hooks just before the conversation prefix is
+// summarized (observational, fire-and-forget). trigger is "auto" or "manual".
+func (s *Session) firePreCompact(trigger string) {
+	if !s.hooksActive(hooks.EventPreCompact) {
+		return
+	}
+	syncHooks, asyncHooks := s.hooksReg().Match(hooks.EventPreCompact, trigger)
+	base := s.buildHookContext(hooks.EventPreCompact, map[string]any{"trigger": trigger})
+	for _, h := range append(syncHooks, asyncHooks...) {
+		s.server.fireAsyncHook(h, base)
+	}
+}
+
+// firePostCompact fires PostCompact hooks after a successful compaction
+// (observational, fire-and-forget). trigger is "auto" or "manual".
+func (s *Session) firePostCompact(trigger string, summarizedTurns int, fromTokens int64) {
+	if !s.hooksActive(hooks.EventPostCompact) {
+		return
+	}
+	syncHooks, asyncHooks := s.hooksReg().Match(hooks.EventPostCompact, trigger)
+	base := s.buildHookContext(hooks.EventPostCompact, map[string]any{
+		"trigger":          trigger,
+		"summarized_turns": summarizedTurns,
+		"from_tokens":      fromTokens,
+	})
+	for _, h := range append(syncHooks, asyncHooks...) {
+		s.server.fireAsyncHook(h, base)
+	}
+}
+
+// permissionRequestHook fires PermissionRequest hooks just before the user is
+// asked to confirm a tool call. A blocking hook may deny (skip the prompt and
+// reject the tool); allow / no-opinion falls through to the normal prompt.
+// Async hooks fire fire-and-forget. Returns a deny reason and a denied flag.
+func (s *Session) permissionRequestHook(ctx context.Context, name string, input map[string]any, requestedDirs []string) (denyReason string, denied bool) {
+	if !s.hooksActive(hooks.EventPermissionRequest) {
+		return "", false
+	}
+	syncHooks, asyncHooks := s.hooksReg().Match(hooks.EventPermissionRequest, name)
+	if len(syncHooks)+len(asyncHooks) == 0 {
+		return "", false
+	}
+	extra := map[string]any{
+		"tool_name":  name,
+		"tool_input": snapshotInput(input),
+	}
+	if len(requestedDirs) > 0 {
+		extra["requested_dirs"] = requestedDirs
+	}
+	base := s.buildHookContext(hooks.EventPermissionRequest, extra)
+	for _, h := range asyncHooks {
+		s.server.fireAsyncHook(h, base)
+	}
+	var decisions []hooks.Decision
+	for _, h := range syncHooks {
+		decisions = append(decisions, s.server.runSyncHook(ctx, h, base))
+	}
+	if dec := hooks.Combine(decisions); dec.Behavior == hooks.BehaviorDeny {
+		reason := dec.Reason
+		if reason == "" {
+			reason = "blocked by hook"
+		}
+		return reason, true
+	}
+	return "", false
+}

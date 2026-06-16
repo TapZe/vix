@@ -55,8 +55,13 @@ or `prompt`:
 | `PreToolUse` | before a tool runs | tool name | yes (deny / rewrite input) |
 | `PostToolUse` | after a tool completes | tool name | no (append context only) |
 | `UserPromptSubmit` | before a prompt enters the turn | — | yes (deny / rewrite prompt) |
+| `PermissionRequest` | before the user is asked to confirm a tool | tool name | yes (deny → skip prompt) |
 | `SessionStart` | when a session begins | source (`startup`/`resume`) | no |
 | `Stop` | when a turn finishes | — | no |
+| `PreCompact` | before the conversation is compacted | trigger (`auto`/`manual`) | no |
+| `PostCompact` | after a successful compaction | trigger (`auto`/`manual`) | no |
+| `SubagentStart` | when a subagent is spawned | agent type | no |
+| `SubagentStop` | when a subagent finishes | agent type | no |
 
 `matcher` is a regex anchored to the whole field; `""` or `"*"` matches all.
 Examples: `bash`, `write_file|edit_file`, `mcp__.*`.
@@ -67,8 +72,8 @@ Examples: `bash`, `write_file|edit_file`, `mcp__.*`.
   workflow/prompt hooks land in the Sessions tab under "Vix-initiated".
 - `mode: "sync"` — runs inline; the agent waits. Only sync hooks can return a
   decision. Add `"blocking": true` to let a deny/modify actually take effect
-  (only valid for `PreToolUse` and `UserPromptSubmit`). A non-blocking sync hook
-  can still inject context but cannot veto.
+  (only valid for `PreToolUse`, `UserPromptSubmit`, and `PermissionRequest`). A
+  non-blocking sync hook can still inject context but cannot veto.
 
 Sync hooks have a tight default timeout (5s; async 10m). A timed-out or broken
 command **fails open** (the action proceeds) so a bad hook never wedges the loop.
@@ -123,8 +128,16 @@ ones; `trigger_type`/`trigger_ref` identify the job/hook that started a vix
 session. `vix_bin` and `socket_path` let a hook call back into *this* daemon
 without guessing the binary path or socket — e.g.
 `"$vix_bin" session create --socket-path "$socket_path"`. Event-specific
-fields: `tool_name`/`tool_input` (tool events), `tool_response`/`is_error`
-(PostToolUse), `prompt` (UserPromptSubmit), `source` (SessionStart).
+fields: `tool_name`/`tool_input` (tool events and `PermissionRequest`, plus
+`requested_dirs` when directory access is requested), `tool_response`/`is_error`
+(PostToolUse), `prompt` (UserPromptSubmit), `source` (SessionStart),
+`trigger` (`PreCompact`/`PostCompact`, with `summarized_turns`/`from_tokens` on
+`PostCompact`), `agent_type`/`agent_id` (`SubagentStart`/`SubagentStop`, plus
+`prompt` on start and `result`/`is_error` on stop).
+
+> `PermissionRequest` fires only when vix is about to ask you to confirm a tool
+> call (interactive sessions). A blocking deny skips the prompt and rejects the
+> tool; allow / no-opinion lets the normal prompt proceed.
 
 > Recursion guard: hooks never fire inside vix-initiated sessions (`origin
 > == "vix"`), so a hook's own tool calls can't re-trigger hooks.
@@ -172,6 +185,18 @@ threshold is crossed. (An async workflow/prompt hook also lands in
   "id": "protect", "enabled": true, "mode": "sync", "blocking": true,
   "trigger": { "event": "PreToolUse", "matcher": "write_file|edit_file|delete_file" },
   "command": "p=$(jq -r .tool_input.path); case \"$p\" in *.env|*/secrets/*) echo \"protected: $p\" >&2; exit 2;; esac; exit 0"
+}
+```
+
+## Example: notify when a subagent finishes (async)
+
+`~/.vix/hooks/subagent-done/hook.json`:
+
+```json
+{
+  "id": "subagent-done", "enabled": true, "mode": "async",
+  "trigger": { "event": "SubagentStop" },
+  "command": "printf '%s finished\\n' \"$(jq -r .agent_type)\" >> ~/.vix/subagents.log"
 }
 ```
 

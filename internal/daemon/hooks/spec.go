@@ -23,11 +23,16 @@ import (
 // supportedEvents are accepted by Validate; the rest of the catalogue is added
 // as it gets wired into the session loop.
 const (
-	EventPreToolUse       = "PreToolUse"
-	EventPostToolUse      = "PostToolUse"
-	EventUserPromptSubmit = "UserPromptSubmit"
-	EventSessionStart     = "SessionStart"
-	EventStop             = "Stop"
+	EventPreToolUse        = "PreToolUse"
+	EventPostToolUse       = "PostToolUse"
+	EventUserPromptSubmit  = "UserPromptSubmit"
+	EventSessionStart      = "SessionStart"
+	EventStop              = "Stop"
+	EventPreCompact        = "PreCompact"
+	EventPostCompact       = "PostCompact"
+	EventSubagentStart     = "SubagentStart"
+	EventSubagentStop      = "SubagentStop"
+	EventPermissionRequest = "PermissionRequest"
 )
 
 // Execution modes.
@@ -40,19 +45,25 @@ const (
 // hook for any other event is rejected so users get an error instead of a hook
 // that silently never runs.
 var supportedEvents = map[string]bool{
-	EventPreToolUse:       true,
-	EventPostToolUse:      true,
-	EventUserPromptSubmit: true,
-	EventSessionStart:     true,
-	EventStop:             true,
+	EventPreToolUse:        true,
+	EventPostToolUse:       true,
+	EventUserPromptSubmit:  true,
+	EventSessionStart:      true,
+	EventStop:              true,
+	EventPreCompact:        true,
+	EventPostCompact:       true,
+	EventSubagentStart:     true,
+	EventSubagentStop:      true,
+	EventPermissionRequest: true,
 }
 
 // blockableEvents is the subset whose sync hooks may veto (Decision deny) or
 // rewrite (Decision modify) the triggering action. Other events can only inject
 // context or run async.
 var blockableEvents = map[string]bool{
-	EventPreToolUse:       true,
-	EventUserPromptSubmit: true,
+	EventPreToolUse:        true,
+	EventUserPromptSubmit:  true,
+	EventPermissionRequest: true,
 }
 
 // defaultSyncTimeout bounds a synchronous hook so it can never wedge the agent
@@ -97,6 +108,7 @@ type Spec struct {
 	Permissions Permissions `json:"permissions,omitempty"`
 	Timeout     string      `json:"timeout,omitempty"`
 	CreatedBy   string      `json:"created_by,omitempty"`
+	Description string      `json:"description,omitempty"` // free-form, shown in the web UI
 
 	// matcherRe is the compiled, anchored matcher. nil means match-all.
 	matcherRe *regexp.Regexp
@@ -158,7 +170,7 @@ func (s *Spec) Validate() error {
 			return fmt.Errorf("blocking hooks require mode \"sync\"")
 		}
 		if !blockableEvents[s.Trigger.Event] {
-			return fmt.Errorf("event %q cannot block (only PreToolUse and UserPromptSubmit may veto)", s.Trigger.Event)
+			return fmt.Errorf("event %q cannot block (only PreToolUse, UserPromptSubmit and PermissionRequest may veto)", s.Trigger.Event)
 		}
 	}
 	if s.Timeout != "" {
@@ -198,6 +210,19 @@ func (s *Spec) TimeoutDuration() time.Duration {
 		return defaultSyncTimeout
 	}
 	return defaultAsyncTimeout
+}
+
+// EffectiveTimeout returns the resolved timeout as a short human string: the
+// author's own value when set, otherwise the mode-based default ("5s" sync,
+// "10m" async). Used by HookSnapshot so the web UI never has to guess.
+func (s *Spec) EffectiveTimeout() string {
+	if s.Timeout != "" {
+		return s.Timeout
+	}
+	if s.EffectiveMode() == ModeSync {
+		return "5s"
+	}
+	return "10m"
 }
 
 // AutoWrite reports the effective auto_write permission (default true).
