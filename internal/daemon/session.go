@@ -50,6 +50,12 @@ type Session struct {
 	messages []llm.MessageParam
 	tools    []llm.ToolParam
 
+	// retryNotices holds transient-error retry notices captured during a
+	// workflow run (overload, rate limit, …), persisted with the session and
+	// projected into event.replay so a reopened run shows the same retry lines
+	// an interactive run renders live. Protected by mu.
+	retryNotices []retryNoticeRecord
+
 	// Fork snapshots: a copy of messages after each completed normal turn,
 	// protected by mu. Used by snapshotMessagesForFork to seed forked sessions.
 	mu            sync.Mutex

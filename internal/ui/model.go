@@ -3251,6 +3251,13 @@ func (m *Model) buildReplayChatMessages(rep protocol.EventReplay) []ChatMessage 
 			case "tool_result":
 				name := toolNames[b.ToolID]
 				out = append(out, renderToolResultWithContext(name, b.Output, b.IsError, false, "", m.styles, m.mdRenderer, m.mdRenderer.width))
+			case "retry":
+				out = append(out, renderRetryMessage(protocol.EventRetry{
+					Attempt:    b.Attempt,
+					MaxRetries: b.MaxRetries,
+					WaitSecs:   b.WaitSecs,
+					Reason:     b.Text,
+				}))
 			}
 		}
 	}

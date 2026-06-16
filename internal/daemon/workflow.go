@@ -106,9 +106,23 @@ type WorkflowRun struct {
 	// execution order so it can be mirrored into the session's chat transcript
 	// (s.messages) when the run finalizes — letting a finished run replay and a
 	// follow-up chat turn pick up with real context. Guarded by transcriptMu
-	// because parallel steps append concurrently.
+	// because parallel steps append concurrently. retryNotices accumulates the
+	// transient-error retry notices (overload, rate limit, …) seen during the
+	// run, also under transcriptMu, so a reopened run replays the same retry
+	// lines an interactive run shows live.
 	transcriptMu sync.Mutex
 	transcript   []workflowTranscriptEntry
+	retryNotices []workflowRetryNotice
+}
+
+// workflowRetryNotice is one transient-error retry that happened during an
+// agent step, captured so the chat transcript can replay it like interactive.
+type workflowRetryNotice struct {
+	StepID     string
+	Reason     string
+	Attempt    int
+	MaxRetries int
+	WaitSecs   int
 }
 
 // workflowTranscriptEntry is one visible agent step's output captured for the
@@ -137,6 +151,44 @@ func (r *WorkflowRun) recordTranscriptEntry(step WorkflowStepDef, stepID, output
 	r.transcriptMu.Unlock()
 }
 
+// recordFailedAgentStep captures a failed agent step so its partial working
+// history (the resolved prompt and any tool_use/tool_result turns it produced
+// before failing) is mirrored into the chat transcript — making a failed run
+// replay just like a successful one. Unlike recordTranscriptEntry it does not
+// gate on visibility or non-empty output: a run that aborted mid-step still
+// produced a conversation the user should see.
+func (r *WorkflowRun) recordFailedAgentStep(step WorkflowStepDef, stepID string) {
+	if step.Type != "agent" {
+		return
+	}
+	r.transcriptMu.Lock()
+	r.transcript = append(r.transcript, workflowTranscriptEntry{
+		StepID:      stepID,
+		Explanation: step.Explanation,
+	})
+	r.transcriptMu.Unlock()
+}
+
+// recordRetry captures one transient-error retry attempt for later replay.
+func (r *WorkflowRun) recordRetry(stepID, reason string, attempt, maxRetries, waitSecs int) {
+	r.transcriptMu.Lock()
+	r.retryNotices = append(r.retryNotices, workflowRetryNotice{
+		StepID:     stepID,
+		Reason:     reason,
+		Attempt:    attempt,
+		MaxRetries: maxRetries,
+		WaitSecs:   waitSecs,
+	})
+	r.transcriptMu.Unlock()
+}
+
+// snapshotRetryNotices returns a copy of the accumulated retry notices.
+func (r *WorkflowRun) snapshotRetryNotices() []workflowRetryNotice {
+	r.transcriptMu.Lock()
+	defer r.transcriptMu.Unlock()
+	return append([]workflowRetryNotice(nil), r.retryNotices...)
+}
+
 // snapshotTranscript returns a copy of the accumulated transcript entries.
 func (r *WorkflowRun) snapshotTranscript() []workflowTranscriptEntry {
 	r.transcriptMu.Lock()
@@ -157,7 +209,8 @@ func (r *WorkflowRun) snapshotTranscript() []workflowTranscriptEntry {
 // (text) pair. No-op when nothing visible was produced.
 func (s *Session) appendWorkflowTranscript(anchor string, exec *WorkflowRun) {
 	entries := exec.snapshotTranscript()
-	if len(entries) == 0 {
+	notices := exec.snapshotRetryNotices()
+	if len(entries) == 0 && len(notices) == 0 {
 		return
 	}
 	if strings.TrimSpace(anchor) == "" {
@@ -174,19 +227,43 @@ func (s *Session) appendWorkflowTranscript(anchor string, exec *WorkflowRun) {
 			msgs = append(msgs, stripThinkingMessages(agent.Messages)...)
 			continue
 		}
-		// No agent instance (shouldn't happen for a visible agent step): keep the
-		// step's text behind a kickoff anchor so nothing is lost.
+		// No agent instance: keep the step's text behind a kickoff anchor so
+		// nothing is lost. A failed step that produced no output yet (recorded
+		// via recordFailedAgentStep) contributes nothing here.
+		if strings.TrimSpace(e.Output) == "" {
+			continue
+		}
 		msgs = append(msgs,
 			llm.NewUserMessage(llm.NewTextBlock(anchor)),
 			llm.NewAssistantMessage(llm.NewTextBlock(strings.TrimRight(e.Output, "\n"))),
 		)
 	}
-	if len(msgs) == 0 {
+	if len(msgs) == 0 && len(notices) == 0 {
 		return
 	}
-	msgs = coalesceRoles(msgs)
+	if len(msgs) > 0 {
+		msgs = coalesceRoles(msgs)
+	}
 	s.mu.Lock()
-	s.appendMessages(msgs...)
+	if len(msgs) > 0 {
+		s.appendMessages(msgs...)
+	}
+	if len(notices) > 0 {
+		// Anchor every notice to the end of the transcript: a failed run's
+		// retries pile up after the agent's partial work, matching what an
+		// interactive run shows just before it gives up. AfterIdx == -1 when
+		// no messages exist at all (rendered before everything on replay).
+		afterIdx := len(s.messages) - 1
+		for _, n := range notices {
+			s.retryNotices = append(s.retryNotices, retryNoticeRecord{
+				AfterIdx:   afterIdx,
+				Reason:     n.Reason,
+				Attempt:    n.Attempt,
+				MaxRetries: n.MaxRetries,
+				WaitSecs:   n.WaitSecs,
+			})
+		}
+	}
 	s.mu.Unlock()
 }
 
@@ -1479,6 +1556,13 @@ func (s *Session) executeParallelSteps(
 						}
 					}
 				}
+				baseOnRetry := stepHooks.OnRetry
+				stepHooks.OnRetry = func(attempt, maxRetries, waitSecs int, reason string) {
+					exec.recordRetry(stepID, reason, attempt, maxRetries, waitSecs)
+					if baseOnRetry != nil {
+						baseOnRetry(attempt, maxRetries, waitSecs, reason)
+					}
+				}
 
 				s.ensureWorkflowAgentContext(agent)
 				output, err := agent.Send(stepCtx, resolvedMessage, stepExecuteTool, streamCb, s.cwd, stepHooks)
@@ -1515,6 +1599,10 @@ func (s *Session) executeParallelSteps(
 					s.emitIfVisible(silent, "event.workflow_step_done", protocol.EventWorkflowStepDone{
 						StepID: stepID, StepIdx: myLogicalStep, Success: false, DurationMs: stepElapsed,
 					})
+					// Keep the failed step's partial history in the transcript
+					// (StepAgents was set above) so a failed run replays like a
+					// successful one.
+					exec.recordFailedAgentStep(step, stepID)
 					errs[idx] = fmt.Errorf("step '%s' failed: %w", stepID, err)
 					return
 				}
@@ -1737,7 +1825,19 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 			return
 		}
 		if ctx.Err() != nil {
+			// Cancelled (user escape / daemon shutdown): keep the run resumable.
 			state.Status = WorkflowStatusPaused
+		} else if s.isInlineWorkflow(pf.Name) {
+			// Terminal failure of an inline (transient) job/hook workflow: its
+			// definition was never persisted, so there is nothing to resume
+			// against. Drop straight to chat — like the finished case — so a
+			// later reopen replays the transcript (agent work + retry notices)
+			// instead of warning the workflow "no longer exists".
+			s.setWorkflowRunState(nil)
+			s.sessionMode = "chat"
+			s.activeWorkflow = ""
+			s.persist()
+			return
 		} else if state.Status == WorkflowStatusRunning {
 			state.Status = WorkflowStatusBlocked
 		}
@@ -2254,6 +2354,15 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 					}
 				},
 				OnBeforeStream: baseHooks.OnBeforeStream,
+				OnRetry: func(attempt, maxRetries, waitSecs int, reason string) {
+					// Capture the retry so a reopened run replays the same
+					// "API overloaded — retrying …" line interactive shows,
+					// then emit it live too.
+					exec.recordRetry(stepID, reason, attempt, maxRetries, waitSecs)
+					if baseHooks.OnRetry != nil {
+						baseHooks.OnRetry(attempt, maxRetries, waitSecs, reason)
+					}
+				},
 			}
 
 			s.ensureWorkflowAgentContext(agent)
@@ -2358,6 +2467,11 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 					DurationMs:   time.Since(workflowStart).Milliseconds(),
 				})
 				s.activePlan = nil
+				// Keep the failed step's agent so appendWorkflowTranscript can
+				// splice its partial working history into the chat transcript —
+				// a failed run then replays just like a successful one.
+				exec.StepAgents[stepID] = agent
+				exec.recordFailedAgentStep(step, stepID)
 				return fmt.Errorf("step '%s' failed: %w", stepID, err)
 			}
 
