@@ -3229,11 +3229,17 @@ func (m *Model) buildReplayChatMessages(rep protocol.EventReplay) []ChatMessage 
 	var out []ChatMessage
 	toolNames := map[string]string{}
 	for _, msg := range rep.Messages {
+		var ts time.Time
+		if msg.Timestamp != "" {
+			if parsed, err := time.Parse(time.RFC3339, msg.Timestamp); err == nil {
+				ts = parsed
+			}
+		}
 		for _, b := range msg.Blocks {
 			switch b.Kind {
 			case "text":
 				if msg.Role == "user" {
-					out = append(out, renderUserMessage(b.Text, m.width))
+					out = append(out, renderUserMessageAt(b.Text, m.width, ts))
 				} else {
 					out = append(out, renderAssistantMessage(b.Text, m.mdRenderer))
 				}

@@ -269,6 +269,24 @@ func TestBuildReplayMessages(t *testing.T) {
 	}
 }
 
+func TestBuildReplayMessagesTimestamp(t *testing.T) {
+	ts := time.Date(2021, 3, 4, 5, 6, 7, 0, time.UTC)
+	stamped := llm.NewUserMessage(llm.NewTextBlock("hi"))
+	stamped.Timestamp = ts
+	legacy := llm.NewAssistantMessage(llm.NewTextBlock("answer")) // zero timestamp
+
+	out := buildReplayMessages([]llm.MessageParam{stamped, legacy})
+	if len(out) != 2 {
+		t.Fatalf("replay messages = %d, want 2", len(out))
+	}
+	if want := ts.Format(time.RFC3339); out[0].Timestamp != want {
+		t.Errorf("stamped Timestamp = %q, want %q", out[0].Timestamp, want)
+	}
+	if out[1].Timestamp != "" {
+		t.Errorf("legacy (zero) Timestamp = %q, want empty", out[1].Timestamp)
+	}
+}
+
 // newReplaySession builds a minimal Session wired for emitReplay (eventChan +
 // ctx). Persistence is disabled (empty paths) so persist() is a no-op.
 func newReplaySession(t *testing.T, rec *sessionRecord) *Session {

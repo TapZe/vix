@@ -1080,7 +1080,22 @@ func (s *Session) AddUserMessage(text string, attachments ...protocol.Attachment
 		contentBlocks = append(contentBlocks, llm.NewImageBlock(att.MediaType, att.Data))
 	}
 
-	s.messages = append(s.messages, llm.NewUserMessage(contentBlocks...))
+	s.appendMessages(llm.NewUserMessage(contentBlocks...))
+}
+
+// appendMessages stamps each message with the current time (when not already
+// set) and appends it to the conversation history. Routing every append
+// through here keeps MessageParam.Timestamp in lockstep across all message
+// kinds (user, assistant, tool results, nudges) so a restored session replays
+// with original send times rather than the relaunch time.
+func (s *Session) appendMessages(msgs ...llm.MessageParam) {
+	now := time.Now()
+	for i := range msgs {
+		if msgs[i].Timestamp.IsZero() {
+			msgs[i].Timestamp = now
+		}
+	}
+	s.messages = append(s.messages, msgs...)
 }
 
 // snapshotMessagesForFork returns a copy of the conversation history at the
@@ -1611,7 +1626,7 @@ func (s *Session) streamWithRetry(
 				ElapsedMs:    stallErr.Elapsed.Milliseconds(),
 				SummaryChars: len(stallErr.Summary),
 			})
-			s.messages = append(s.messages, nudge)
+			s.appendMessages(nudge)
 			log.Printf("\033[31m[session req=%s] thinking stall after %s (attempt %d/%d, nudging and retrying)\033[0m",
 				turnID, stallErr.Elapsed, attempt+1, maxRetries)
 			lastReason = "Thinking stall — nudging model"
@@ -1876,14 +1891,14 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 		s.mu.Unlock()
 
 		LogLLMCall(s.model, system, s.messages, s.tools, msg)
-		s.messages = append(s.messages, msg.ToParam())
+		s.appendMessages(msg.ToParam())
 
 		if msg.StopReason == llm.StopEndTurn {
 			log.Printf("\033[34m[session] end of turn detected\033[0m")
 			s.endTurnCount++
 			if todoNudges < 3 && s.hasPendingTodos() {
 				todoNudges++
-				s.messages = append(s.messages, llm.NewUserMessage(
+				s.appendMessages(llm.NewUserMessage(
 					llm.NewTextBlock("You still have pending or in-progress TODO items. Please either complete them or call todo_write with an empty list to clear the list before finishing."),
 				))
 				continue
@@ -1900,7 +1915,7 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 			// Always append tool results — the API requires every tool_use
 			// to have a matching tool_result, even on cancellation.
 			if len(toolResults) > 0 {
-				s.messages = append(s.messages, llm.NewUserMessage(toolResults...))
+				s.appendMessages(llm.NewUserMessage(toolResults...))
 			}
 			if cancelled {
 				s.emit("event.stream_done", protocol.EventStreamDone{})

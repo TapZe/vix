@@ -557,6 +557,9 @@ func buildReplayMessages(msgs []llm.MessageParam) []protocol.ReplayMessage {
 	out := make([]protocol.ReplayMessage, 0, len(msgs))
 	for _, m := range msgs {
 		rm := protocol.ReplayMessage{Role: string(m.Role)}
+		if !m.Timestamp.IsZero() {
+			rm.Timestamp = m.Timestamp.Format(time.RFC3339)
+		}
 		for _, b := range m.Content {
 			switch b.Type {
 			case llm.BlockText:

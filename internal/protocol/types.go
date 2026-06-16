@@ -357,6 +357,11 @@ type ReplayBlock struct {
 type ReplayMessage struct {
 	Role   string        `json:"role"` // "user" | "assistant"
 	Blocks []ReplayBlock `json:"blocks"`
+	// Timestamp is when the turn was originally sent (RFC3339), so the
+	// replayed viewport shows original send times instead of the relaunch
+	// time. Empty for legacy sessions persisted before timestamps existed;
+	// the TUI omits the "Sent at" line in that case.
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // EventReplay is emitted once, immediately after event.session_started, when a

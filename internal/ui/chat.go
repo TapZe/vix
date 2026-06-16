@@ -69,12 +69,17 @@ type ChatMessage struct {
 	TurnNum      int           // 1-based turn number passed to renderTurnInfo
 }
 
-// renderUserMessage creates a rendered user message.
-// width is the total terminal width used for wrapping long lines.
+// renderUserMessage creates a rendered user message stamped with the current
+// time (live sends).
 func renderUserMessage(text string, width int) ChatMessage {
-	now := renderNow()
+	return renderUserMessageAt(text, width, renderNow())
+}
+
+// renderUserMessageAt creates a rendered user message stamped with ts. A zero
+// ts (e.g. a legacy replayed message with no persisted timestamp) omits the
+// "Sent at …" line entirely rather than showing a misleading time.
+func renderUserMessageAt(text string, width int, ts time.Time) ChatMessage {
 	bar := userPromptIcon.Render("▎")
-	ts := userTimestampStyle.Render("Sent at " + now.Format("3:04 PM"))
 
 	// bar(1) + 2 spaces = 3 columns of prefix per visual line
 	const prefix = 3
@@ -92,12 +97,22 @@ func renderUserMessage(text string, width int) ChatMessage {
 			sb.WriteString(fmt.Sprintf("%s  %s\n", bar, userPromptStyle.Render(wl)))
 		}
 	}
-	sb.WriteString(fmt.Sprintf("%s  %s\n", bar, ts))
+	if !ts.IsZero() {
+		// In test-render mode the displayed instant is frozen for byte-stable
+		// screenshots; the struct still carries the real ts. Production renders
+		// the actual stored time.
+		shown := ts
+		if testRenderMode {
+			shown = frozenClock
+		}
+		tsLine := userTimestampStyle.Render("Sent at " + shown.Format("3:04 PM"))
+		sb.WriteString(fmt.Sprintf("%s  %s\n", bar, tsLine))
+	}
 	rendered := sb.String() + "\n"
 	return ChatMessage{
 		Type:      MsgUser,
 		Text:      text,
-		Timestamp: now,
+		Timestamp: ts,
 		Rendered:  rendered,
 	}
 }
@@ -1515,9 +1530,7 @@ func formatModelName(model string) string {
 func (msg ChatMessage) rerender(md *MarkdownRenderer, s Styles, width int) ChatMessage {
 	switch msg.Type {
 	case MsgUser:
-		result := renderUserMessage(msg.Text, width-4)
-		result.Timestamp = msg.Timestamp
-		return result
+		return renderUserMessageAt(msg.Text, width-4, msg.Timestamp)
 	case MsgAssistant:
 		return renderAssistantMessage(msg.Text, md)
 	case MsgThinking:
