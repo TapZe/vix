@@ -18,6 +18,18 @@ const (
 	StatusTimeout = "timeout"
 )
 
+// maxRecentRuns bounds how many run records State.RecentRuns retains.
+const maxRecentRuns = 10
+
+// RunRecord is one entry in a job's recent-run history (State.RecentRuns).
+type RunRecord struct {
+	At        time.Time `json:"at"`
+	Status    string    `json:"status"` // ok | error | skipped | timeout
+	Error     string    `json:"error,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
+	Duration  string    `json:"duration,omitempty"` // Go duration string
+}
+
 // State is the machine-written runtime state of one job, persisted as
 // <id>/state.json inside the job's own subdirectory (a sibling of job.json).
 // Never hand-edited.
@@ -39,6 +51,19 @@ type State struct {
 	// SpecHash fingerprints the spec this state was computed against, so an
 	// edited spec resets error counters / AutoDisabled / Completed.
 	SpecHash string `json:"spec_hash,omitempty"`
+	// RecentRuns is the job's recent-run history, newest last, capped at
+	// maxRecentRuns. Appended on every finished run (scheduled, manual, and
+	// catch-up skip) via appendRun.
+	RecentRuns []RunRecord `json:"recent_runs,omitempty"`
+}
+
+// appendRun records one run in the history, newest last, trimming to the most
+// recent maxRecentRuns entries.
+func (s *State) appendRun(r RunRecord) {
+	s.RecentRuns = append(s.RecentRuns, r)
+	if len(s.RecentRuns) > maxRecentRuns {
+		s.RecentRuns = s.RecentRuns[len(s.RecentRuns)-maxRecentRuns:]
+	}
 }
 
 // Store reads job specs from a directory and round-trips per-job state files.

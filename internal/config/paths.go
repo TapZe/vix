@@ -335,17 +335,32 @@ func (p VixPaths) Hooks() string {
 	return filepath.Join(p.home, "hooks")
 }
 
-// HeartbeatMD returns the path of the user-global heartbeat whiteboard file
-// read by the default heartbeat job's prompt. Override mode:
-// override/heartbeat.md; normal mode: home/heartbeat.md.
-func (p VixPaths) HeartbeatMD() string {
-	if p.override != "" {
-		return filepath.Join(p.override, "heartbeat.md")
-	}
-	if p.home == "" {
+// HookState returns the path of one hook's machine-written runtime state file
+// (recent-fire history and last-fire summary), kept separate from the
+// user-authored spec (hook.json) so spec files never churn. It lives inside the
+// hook's own subdirectory, a sibling of hook.json: override mode:
+// override/hooks/<id>/state.json; normal mode: home/hooks/<id>/state.json.
+// Empty when the hooks directory is unavailable (no home directory).
+func (p VixPaths) HookState(id string) string {
+	dir := p.Hooks()
+	if dir == "" || id == "" {
 		return ""
 	}
-	return filepath.Join(p.home, "heartbeat.md")
+	return filepath.Join(dir, id, "state.json")
+}
+
+// HeartbeatMD returns the path of the heartbeat whiteboard file read by the
+// default heartbeat job's prompt. It lives inside the heartbeat job's own
+// subdirectory, a sibling of its job.json: override mode:
+// override/jobs/heartbeat/heartbeat.md; normal mode:
+// home/jobs/heartbeat/heartbeat.md. Empty when the jobs directory is
+// unavailable (no home directory).
+func (p VixPaths) HeartbeatMD() string {
+	dir := p.Jobs()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "heartbeat", "heartbeat.md")
 }
 
 func (p VixPaths) subdirs(name string) []string {

@@ -104,7 +104,8 @@ type config struct {
 	workdirFiles   []homeFile
 	cols           int
 	rows           int
-	noDefaultCreds bool // omit the default ANTHROPIC_*/OPENAI_* env (force .env resolution)
+	noDefaultCreds bool     // omit the default ANTHROPIC_*/OPENAI_* env (force .env resolution)
+	tuiArgs        []string // extra CLI flags appended to the `vix` TUI launch
 }
 
 // homeFile seeds a file under the per-test HOME before vixd starts. Content
@@ -159,6 +160,14 @@ func WithWorkdirFixture(dir string) Option { return func(c *config) { c.fixture 
 // WithTermSize fixes the PTY dimensions (affects layout and screenshots).
 func WithTermSize(cols, rows int) Option {
 	return func(c *config) { c.cols, c.rows = cols, rows }
+}
+
+// WithVixArgs appends extra CLI flags to the `vix` TUI launch command (e.g.
+// "-disable-automatic-write-permission" so write-class tools surface a
+// confirmation prompt). Flags are passed verbatim after the harness-managed
+// -socket-path / -workdir args.
+func WithVixArgs(args ...string) Option {
+	return func(c *config) { c.tuiArgs = append(c.tuiArgs, args...) }
 }
 
 // WithHomeFile seeds a file under the per-test HOME before vixd starts (e.g. a

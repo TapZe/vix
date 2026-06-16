@@ -76,6 +76,8 @@ read it back after creating or editing a job and check the fields:
 - Later: `last_status` (`ok | error | skipped | timeout`), `last_error`,
   `last_session_id` (the run's session), `consecutive_errors` (5 in a row
   auto-disables the job until the spec file is edited).
+- `recent_runs` — the last 10 runs (newest last), each with `at`, `status`,
+  `error`, `session_id`, and `duration`. Useful for spotting a flapping job.
 
 To test-fire a new job, give it a near-due schedule (an `at` a minute out, or
 `@every 1m`), watch one run land, then set the real schedule.
@@ -83,7 +85,7 @@ To test-fire a new job, give it a near-due schedule (an `at` a minute out, or
 ## Heartbeat (already installed)
 
 `~/.vix/jobs/heartbeat/job.json` ships enabled: every 30 minutes (9:00-19:59) it
-reads `~/.vix/heartbeat.md` and follows it. The file is the *whiteboard*: add
+reads `~/.vix/jobs/heartbeat/heartbeat.md` and follows it. The file is the *whiteboard*: add
 or remove tasks there — never touch the job. While the file holds only
 headings/comments the run skips with zero tokens. A run whose final answer is
 `HEARTBEAT_OK` also leaves no trace; anything else surfaces in the Sessions

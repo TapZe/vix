@@ -40,7 +40,7 @@ func TestConfigWatcherJobStateIgnored(t *testing.T) {
 	// A write to <id>/state.json (inside a job subdir) belongs to the tree but
 	// must be ignored.
 	stateEv := fsnotify.Event{Name: filepath.Join(jobsDir, "demo", "state.json"), Op: fsnotify.Write}
-	if !cw.handleSpecEvent(stateEv, jobsDir, true, reload) {
+	if !cw.handleSpecEvent(stateEv, jobsDir, "job.json", reload) {
 		t.Fatal("state-file event should be recognised as part of the jobs tree")
 	}
 	select {
@@ -51,7 +51,7 @@ func TestConfigWatcherJobStateIgnored(t *testing.T) {
 
 	// Its atomic-write temp file (state.*.tmp) must be ignored too.
 	tmpEv := fsnotify.Event{Name: filepath.Join(jobsDir, "demo", "state.1234.tmp"), Op: fsnotify.Create}
-	if !cw.handleSpecEvent(tmpEv, jobsDir, true, reload) {
+	if !cw.handleSpecEvent(tmpEv, jobsDir, "job.json", reload) {
 		t.Fatal("state temp-file event should be recognised as part of the jobs tree")
 	}
 	select {
@@ -61,13 +61,13 @@ func TestConfigWatcherJobStateIgnored(t *testing.T) {
 	}
 
 	// A path outside the tree is not handled here.
-	if cw.handleSpecEvent(fsnotify.Event{Name: filepath.Join(dir, "other"), Op: fsnotify.Write}, jobsDir, true, reload) {
+	if cw.handleSpecEvent(fsnotify.Event{Name: filepath.Join(dir, "other"), Op: fsnotify.Write}, jobsDir, "job.json", reload) {
 		t.Fatal("event outside the jobs tree must not be handled")
 	}
 
 	// A write to a nested job.json must trigger a reload.
 	specEv := fsnotify.Event{Name: filepath.Join(jobsDir, "demo", "job.json"), Op: fsnotify.Write}
-	cw.handleSpecEvent(specEv, jobsDir, true, reload)
+	cw.handleSpecEvent(specEv, jobsDir, "job.json", reload)
 	select {
 	case <-reloaded:
 	case <-time.After(3 * time.Second):
@@ -102,7 +102,7 @@ func TestConfigWatcherJobMemoryIgnored(t *testing.T) {
 
 	// A write to <id>/memory.md belongs to the tree but must be ignored.
 	memEv := fsnotify.Event{Name: filepath.Join(jobsDir, "demo", "memory.md"), Op: fsnotify.Write}
-	if !cw.handleSpecEvent(memEv, jobsDir, true, reload) {
+	if !cw.handleSpecEvent(memEv, jobsDir, "job.json", reload) {
 		t.Fatal("memory-file event should be recognised as part of the jobs tree")
 	}
 	select {
@@ -113,11 +113,69 @@ func TestConfigWatcherJobMemoryIgnored(t *testing.T) {
 
 	// The spec file in the same directory still reloads.
 	specEv := fsnotify.Event{Name: filepath.Join(jobsDir, "demo", "job.json"), Op: fsnotify.Write}
-	cw.handleSpecEvent(specEv, jobsDir, true, reload)
+	cw.handleSpecEvent(specEv, jobsDir, "job.json", reload)
 	select {
 	case <-reloaded:
 	case <-time.After(3 * time.Second):
 		t.Fatal("nested job.json write should trigger a reload")
+	}
+}
+
+// TestConfigWatcherHookStateIgnored pins that a write to a hook's runtime state
+// file (hooks/<id>/state.json), now written on every fire, does NOT trigger a
+// hook registry reload — otherwise every fire's state write would loop — while
+// a write to a sibling hook.json does.
+func TestConfigWatcherHookStateIgnored(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(filepath.Join(hooksDir, "demo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	reloaded := make(chan struct{}, 8)
+	cw := &configWatcher{
+		hooksDir: hooksDir,
+		w:        w,
+		debounce: make(map[string]*time.Timer),
+	}
+	reload := func() { reloaded <- struct{}{} }
+
+	// A write to <id>/state.json (inside a hook subdir) belongs to the tree but
+	// must be ignored.
+	stateEv := fsnotify.Event{Name: filepath.Join(hooksDir, "demo", "state.json"), Op: fsnotify.Write}
+	if !cw.handleSpecEvent(stateEv, hooksDir, "hook.json", reload) {
+		t.Fatal("state-file event should be recognised as part of the hooks tree")
+	}
+	select {
+	case <-reloaded:
+		t.Fatal("<id>/state.json write must not trigger a reload")
+	case <-time.After(2 * configWatchDebounce):
+	}
+
+	// Its atomic-write temp file (state.*.tmp) must be ignored too.
+	tmpEv := fsnotify.Event{Name: filepath.Join(hooksDir, "demo", "state.1234.tmp"), Op: fsnotify.Create}
+	if !cw.handleSpecEvent(tmpEv, hooksDir, "hook.json", reload) {
+		t.Fatal("state temp-file event should be recognised as part of the hooks tree")
+	}
+	select {
+	case <-reloaded:
+		t.Fatal("state temp-file write must not trigger a reload")
+	case <-time.After(2 * configWatchDebounce):
+	}
+
+	// A write to a nested hook.json must trigger a reload.
+	specEv := fsnotify.Event{Name: filepath.Join(hooksDir, "demo", "hook.json"), Op: fsnotify.Write}
+	cw.handleSpecEvent(specEv, hooksDir, "hook.json", reload)
+	select {
+	case <-reloaded:
+	case <-time.After(3 * time.Second):
+		t.Fatal("nested hook.json write should trigger a reload")
 	}
 }
 

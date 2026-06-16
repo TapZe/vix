@@ -147,11 +147,11 @@ func (cw *configWatcher) run(ctx context.Context) {
 			case cw.langPath:
 				cw.schedule(cw.langPath, cw.reloadLanguages)
 			default:
-				if cw.jobsDir != "" && cw.handleSpecEvent(ev, cw.jobsDir, true, cw.reloadJobs) {
+				if cw.jobsDir != "" && cw.handleSpecEvent(ev, cw.jobsDir, "job.json", cw.reloadJobs) {
 					continue
 				}
 				if cw.hooksDir != "" {
-					cw.handleSpecEvent(ev, cw.hooksDir, false, cw.reloadHooks)
+					cw.handleSpecEvent(ev, cw.hooksDir, "hook.json", cw.reloadHooks)
 				}
 			}
 		case err, ok := <-cw.w.Errors:
@@ -166,11 +166,12 @@ func (cw *configWatcher) run(ctx context.Context) {
 // handleSpecEvent processes a filesystem event for a job/hook spec tree rooted
 // at root. It returns true when the event belongs to that tree (so the caller
 // stops looking), even when the event is deliberately ignored. A newly created
-// id subdirectory is added to the watcher so its spec file (job.json /
-// hook.json), written moments later, is seen. For jobs, each job's state.json
-// (and its temp files) sits inside the job's own subdirectory; their frequent
-// writes are filtered out so they never trigger a reload loop.
-func (cw *configWatcher) handleSpecEvent(ev fsnotify.Event, root string, isJobs bool, reload func()) bool {
+// id subdirectory is added to the watcher so its spec file (specFile, i.e.
+// job.json / hook.json), written moments later, is seen. Each id's machine-
+// written state.json (and its temp files) sits inside the id's own
+// subdirectory; their frequent writes are filtered out so they never trigger a
+// reload loop. Only the spec file itself drives a reload.
+func (cw *configWatcher) handleSpecEvent(ev fsnotify.Event, root, specFile string, reload func()) bool {
 	clean := filepath.Clean(ev.Name)
 	if clean == root {
 		return true
@@ -178,14 +179,12 @@ func (cw *configWatcher) handleSpecEvent(ev fsnotify.Event, root string, isJobs 
 	if !strings.HasPrefix(clean, root+string(os.PathSeparator)) {
 		return false
 	}
-	// Per-job runtime state (<id>/state.json and its temp files) lives inside a
-	// watched job subdirectory; its frequent writes must never trigger a reload
+	// Per-id runtime state (<id>/state.json and its temp files) lives inside a
+	// watched subdirectory; its frequent writes must never trigger a reload
 	// loop.
-	if isJobs {
-		parent := filepath.Dir(clean)
-		if filepath.Dir(parent) == root && strings.HasPrefix(filepath.Base(clean), "state.") {
-			return true
-		}
+	parent := filepath.Dir(clean)
+	if filepath.Dir(parent) == root && strings.HasPrefix(filepath.Base(clean), "state.") {
+		return true
 	}
 	// A new id directory: start watching it so the spec file written inside is
 	// picked up (fsnotify does not recurse).
@@ -196,14 +195,11 @@ func (cw *configWatcher) handleSpecEvent(ev fsnotify.Event, root string, isJobs 
 			return true
 		}
 	}
-	// For jobs, only the spec file itself (<id>/job.json) drives a reload. Other
-	// files a run may write inside its own job directory — a memory file, scratch
-	// output — must not trigger a spec reload (state.* is already excluded above).
-	if isJobs {
-		parent := filepath.Dir(clean)
-		if filepath.Dir(parent) == root && filepath.Base(clean) != "job.json" {
-			return true
-		}
+	// Only the spec file itself (<id>/<specFile>) drives a reload. Other files a
+	// run may write inside its own id directory — a memory file, scratch output —
+	// must not trigger a spec reload (state.* is already excluded above).
+	if filepath.Dir(parent) == root && filepath.Base(clean) != specFile {
+		return true
 	}
 	cw.schedule(root, reload)
 	return true

@@ -25,22 +25,34 @@ func (s *Server) runSyncHook(ctx context.Context, spec hooks.Spec, base map[stri
 	s.logHookFired(fireID, spec, false, base)
 	start := time.Now()
 	var dec hooks.Decision
+	var errMsg string
 	if spec.Command != "" {
 		stdin, _ := json.Marshal(base)
 		code, out, errOut := runHookCommand(ctx, spec, cwd, stdin)
 		if code < 0 {
-			s.logHookError(fireID, spec, "command_exec", strings.TrimSpace(errOut), code)
+			errMsg = strings.TrimSpace(errOut)
+			s.logHookError(fireID, spec, "command_exec", errMsg, code)
 		}
 		dec = hooks.ParseCommandDecision(code, out, errOut)
 	} else {
 		final, hadErr := s.runHookSession(ctx, spec, hookSessionText(spec, base), cwd, false, "")
 		if hadErr {
-			s.logHookError(fireID, spec, "agent", "hook session errored", 0)
+			errMsg = "hook session errored"
+			s.logHookError(fireID, spec, "agent", errMsg, 0)
 		}
 		dec = hooks.ParseTextDecision(final)
 	}
 	dec = downgradeIfNonBlocking(spec, dec)
-	s.logHookFinished(fireID, spec, dec.Behavior, time.Since(start))
+	dur := time.Since(start)
+	s.logHookFinished(fireID, spec, dec.Behavior, dur)
+	s.recordHookRun(spec, hooks.RunRecord{
+		At:       start,
+		Status:   dec.Behavior,
+		Async:    false,
+		Event:    spec.Trigger.Event,
+		Error:    errMsg,
+		Duration: dur.String(),
+	})
 	return dec
 }
 
@@ -73,21 +85,36 @@ func (s *Server) fireHookAsync(spec hooks.Spec, base map[string]any, runID strin
 		start := time.Now()
 		cwd := hookCWD(spec, base)
 		status := "done"
+		var errMsg string
+		sessionID := ""
 		if isCommand {
 			stdin, _ := json.Marshal(base)
 			code, _, errOut := runHookCommand(ctx, spec, cwd, stdin)
 			if code < 0 {
-				s.logHookError(fireID, spec, "command_exec", strings.TrimSpace(errOut), code)
+				errMsg = strings.TrimSpace(errOut)
+				s.logHookError(fireID, spec, "command_exec", errMsg, code)
 				status = "error"
 			}
 		} else {
+			sessionID = runID
 			_, hadErr := s.runHookSession(ctx, spec, hookSessionText(spec, base), cwd, true, runID)
 			if hadErr {
-				s.logHookError(fireID, spec, "agent", "hook session errored", 0)
+				errMsg = "hook session errored"
+				s.logHookError(fireID, spec, "agent", errMsg, 0)
 				status = "error"
 			}
 		}
-		s.logHookFinished(fireID, spec, status, time.Since(start))
+		dur := time.Since(start)
+		s.logHookFinished(fireID, spec, status, dur)
+		s.recordHookRun(spec, hooks.RunRecord{
+			At:        start,
+			Status:    status,
+			Async:     true,
+			Event:     spec.Trigger.Event,
+			Error:     errMsg,
+			SessionID: sessionID,
+			Duration:  dur.String(),
+		})
 	}()
 	if isCommand {
 		return "", fireID
@@ -115,6 +142,16 @@ func (s *Server) TriggerHook(id string) (string, string, error) {
 	}
 	sessionID, fireID := s.fireHookAsync(spec, base, "")
 	return sessionID, fireID, nil
+}
+
+// recordHookRun appends a fire to the hook's recent-run history via the
+// registry. Nil-safe: when the hooks engine is disabled there is no registry to
+// record against.
+func (s *Server) recordHookRun(spec hooks.Spec, rec hooks.RunRecord) {
+	if s.hookRegistry == nil {
+		return
+	}
+	s.hookRegistry.RecordRun(spec.ID, rec)
 }
 
 // downgradeIfNonBlocking strips a non-blocking hook's veto powers: a deny is

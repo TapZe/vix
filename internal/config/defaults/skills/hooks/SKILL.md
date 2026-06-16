@@ -209,6 +209,16 @@ mistakes: setting more than one action (command / workflow_id / workflow /
 prompt — and `workflow_id` and `workflow` are mutually exclusive), `blocking`
 without `"mode": "sync"`, or `blocking` on a non-blockable event.
 
+After a hook fires, its outcome is recorded in that hook's own
+`~/.vix/hooks/<id>/state.json` (a sibling of `hook.json`, machine-written —
+never hand-edit). It carries `last_fired_at` / `last_status` / `last_error` and
+a `recent_runs` history of the last 10 fires, each with `at`, `status` (sync:
+`allow | deny | context | modify`; async: `done | error`), `async`, `event`,
+`error`, `session_id` (async workflow/prompt hooks only), and `duration`. A
+manual `vix hook trigger <id>` is recorded too (as an async fire). Read it back
+to confirm a hook is firing and how it is resolving. The full audit trail of
+every fire stays in the run log under `~/.vix/logs/hooks/<date>.jsonl`.
+
 ## Kill switch
 
 Disable the whole engine with `"features": { "hooks": false }` in

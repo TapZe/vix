@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 )
 
-// Store reads hook specs from a directory. Unlike jobs, hooks keep no runtime
-// state file — they fire on events, with nothing to schedule or persist.
+// Store reads hook specs from a directory and round-trips per-hook state files.
+// Specs are user-authored (<id>/hook.json); state is machine-written
+// (<id>/state.json, a sibling) so spec files never churn.
 type Store struct {
 	specsDir string
 }
@@ -73,4 +74,82 @@ func (st *Store) LoadSpecs() ([]Spec, map[string]string) {
 		specs = append(specs, spec)
 	}
 	return specs, invalid
+}
+
+// LoadState reads every hook's state file (<id>/state.json) under the spec
+// directory and returns them keyed by id. Missing or corrupt files are skipped
+// (state is reconstructible). Returns an empty map when the spec directory is
+// unavailable.
+func (st *Store) LoadState() map[string]*State {
+	out := make(map[string]*State)
+	if st.specsDir == "" {
+		return out
+	}
+	entries, err := os.ReadDir(st.specsDir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		data, err := os.ReadFile(filepath.Join(st.specsDir, id, "state.json"))
+		if err != nil {
+			continue
+		}
+		var s State
+		if err := json.Unmarshal(data, &s); err != nil {
+			continue
+		}
+		out[id] = &s
+	}
+	return out
+}
+
+// SaveStateFor atomically writes one hook's state file to <id>/state.json (temp
+// file + rename). The hook's subdirectory is created if needed. No-op when the
+// spec directory or id is unavailable.
+func (st *Store) SaveStateFor(id string, state *State) error {
+	if st.specsDir == "" || id == "" || state == nil {
+		return nil
+	}
+	hookDir := filepath.Join(st.specsDir, id)
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(hookDir, "state.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, filepath.Join(hookDir, "state.json"))
+}
+
+// DeleteState removes one hook's state file. Used when a spec vanishes from disk
+// but its subdirectory lingers. A missing file is not an error. No-op when the
+// spec directory or id is unavailable.
+func (st *Store) DeleteState(id string) error {
+	if st.specsDir == "" || id == "" {
+		return nil
+	}
+	err := os.Remove(filepath.Join(st.specsDir, id, "state.json"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

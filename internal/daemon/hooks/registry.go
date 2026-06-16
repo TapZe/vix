@@ -3,6 +3,7 @@ package hooks
 import (
 	"sort"
 	"sync"
+	"time"
 )
 
 // Registry is the in-memory, hot-reloadable index of enabled hook specs grouped
@@ -16,30 +17,50 @@ type Registry struct {
 	all      []Spec
 	disabled int
 	invalid  map[string]string
+
+	// stateMu guards the per-hook runtime state (recent-fire history), kept
+	// separate from the spec index so it survives the wholesale Reload swap.
+	stateMu sync.Mutex
+	state   map[string]*State
 }
 
 // HookSnapshot is a read-only view of a hook for external consumers (the web UI
 // hooks tab). It carries the spec fields the UI renders, with the mode resolved
 // to its effective value and permissions flattened to resolved booleans.
 type HookSnapshot struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name"`
-	Enabled     bool           `json:"enabled"`
-	Trigger     HookTrigger    `json:"trigger"`
-	Mode        string         `json:"mode"`
-	Command     string         `json:"command"`
-	Permissions map[string]any `json:"permissions"`
-	CreatedBy   string         `json:"created_by"`
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Enabled        bool           `json:"enabled"`
+	Trigger        HookTrigger    `json:"trigger"`
+	Mode           string         `json:"mode"`
+	Blocking       bool           `json:"blocking"`
+	Command        string         `json:"command,omitempty"`
+	WorkflowID     string         `json:"workflow_id,omitempty"`
+	WorkflowInline bool           `json:"workflow_inline,omitempty"`
+	Prompt         string         `json:"prompt,omitempty"`
+	CWD            string         `json:"cwd,omitempty"`
+	Timeout        string         `json:"timeout"`
+	Description    string         `json:"description,omitempty"`
+	Permissions    map[string]any `json:"permissions"`
+	CreatedBy      string         `json:"created_by"`
+
+	// Runtime history, attached from the hook's persisted State. LastFiredAt is
+	// the zero time when the hook has never fired; RecentRuns is newest-last,
+	// capped at maxRecentRuns.
+	LastFiredAt time.Time   `json:"last_fired_at,omitempty"`
+	RecentRuns  []RunRecord `json:"recent_runs,omitempty"`
 }
 
 // NewRegistry builds a registry over the store and performs the initial load.
 func NewRegistry(store *Store) *Registry {
-	r := &Registry{store: store, byEvent: map[string][]Spec{}}
+	r := &Registry{store: store, byEvent: map[string][]Spec{}, state: store.LoadState()}
 	r.Reload()
 	return r
 }
 
-// Reload re-reads the spec directory and atomically swaps the index.
+// Reload re-reads the spec directory and atomically swaps the index. Per-hook
+// runtime state (recent-fire history) is preserved across the swap; state for
+// ids that no longer exist on disk is dropped and its state file removed.
 func (r *Registry) Reload() {
 	specs, invalid := r.store.LoadSpecs()
 	byEvent := make(map[string][]Spec)
@@ -57,6 +78,63 @@ func (r *Registry) Reload() {
 	r.disabled = disabled
 	r.invalid = invalid
 	r.mu.Unlock()
+
+	// Prune runtime state for hooks whose spec vanished (neither valid nor
+	// invalid). The state map itself is preserved across the swap.
+	present := make(map[string]bool, len(specs)+len(invalid))
+	for _, s := range specs {
+		present[s.ID] = true
+	}
+	for id := range invalid {
+		present[id] = true
+	}
+	r.stateMu.Lock()
+	for id := range r.state {
+		if !present[id] {
+			delete(r.state, id)
+			r.store.DeleteState(id)
+		}
+	}
+	r.stateMu.Unlock()
+}
+
+// RecordRun appends one fire to the hook's recent-run history, updates the
+// last-* summary fields, and persists the state file. Best-effort: a persist
+// error is swallowed (state is reconstructible from the run log). Safe for
+// concurrent fires of the same hook.
+func (r *Registry) RecordRun(id string, rec RunRecord) {
+	if id == "" {
+		return
+	}
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	if r.state == nil {
+		r.state = make(map[string]*State)
+	}
+	st := r.state[id]
+	if st == nil {
+		st = &State{}
+		r.state[id] = st
+	}
+	st.LastFiredAt = rec.At
+	st.LastStatus = rec.Status
+	st.LastError = rec.Error
+	st.appendRun(rec)
+	r.store.SaveStateFor(id, st)
+}
+
+// StateByID returns a copy of the hook's runtime state, or nil when none has
+// been recorded yet.
+func (r *Registry) StateByID(id string) *State {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	st := r.state[id]
+	if st == nil {
+		return nil
+	}
+	cp := *st
+	cp.RecentRuns = append([]RunRecord(nil), st.RecentRuns...)
+	return &cp
 }
 
 // Match returns the enabled hooks for event whose matcher accepts field, split
@@ -120,19 +198,31 @@ func (r *Registry) Snapshot() []HookSnapshot {
 	defer r.mu.RUnlock()
 	out := make([]HookSnapshot, 0, len(r.all))
 	for _, s := range r.all {
-		out = append(out, HookSnapshot{
-			ID:      s.ID,
-			Name:    s.Name,
-			Enabled: s.Enabled,
-			Trigger: s.Trigger,
-			Mode:    s.EffectiveMode(),
-			Command: s.Command,
+		snap := HookSnapshot{
+			ID:             s.ID,
+			Name:           s.Name,
+			Enabled:        s.Enabled,
+			Trigger:        s.Trigger,
+			Mode:           s.EffectiveMode(),
+			Blocking:       s.Blocking,
+			Command:        s.Command,
+			WorkflowID:     s.WorkflowID,
+			WorkflowInline: s.Workflow != nil,
+			Prompt:         s.Prompt,
+			CWD:            s.CWD,
+			Timeout:        s.EffectiveTimeout(),
+			Description:    s.Description,
 			Permissions: map[string]any{
 				"auto_write": s.AutoWrite(),
 				"auto_dirs":  s.AutoDirs(),
 			},
 			CreatedBy: s.CreatedBy,
-		})
+		}
+		if st := r.StateByID(s.ID); st != nil {
+			snap.LastFiredAt = st.LastFiredAt
+			snap.RecentRuns = st.RecentRuns
+		}
+		out = append(out, snap)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

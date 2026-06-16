@@ -85,7 +85,7 @@ run executes in an isolated headless session (plain prompt, or a workflow named
 via `workflow_id` or embedded inline via `workflow` — at most one) and lands in
 the Sessions tab under "Vix-initiated".
 Triggers: `cron` (robfig syntax incl. `@every`) and one-shot `at`. The shipped
-`heartbeat` job reads `~/.vix/heartbeat.md` every 30 minutes and skips with
+`heartbeat` job reads `~/.vix/jobs/heartbeat/heartbeat.md` every 30 minutes and skips with
 zero tokens while the file is effectively empty (or the run answers
 HEARTBEAT_OK). The model-facing surface is the `jobs` skill (no tool, no slash
 command): the agent writes job files directly and verifies via each job's

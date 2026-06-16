@@ -72,3 +72,51 @@ func TestJobsPerJobStateFile(t *testing.T) {
 
 	h.UI.Shot("per-job-state")
 }
+
+// recentRunsSpec is a one-shot job whose fire time is in the past, so the
+// scheduler runs it immediately at startup and records it in the run history.
+const recentRunsSpec = `{
+  "id": "e2e-recent",
+  "name": "E2E Recent Runs",
+  "enabled": true,
+  "trigger": {"type": "at", "time": "2000-01-01T00:00:00Z"},
+  "prompt": "Say hello.",
+  "cwd": "{{WORKDIR}}",
+  "created_by": "vix"
+}`
+
+// TestJobsRecentRunsHistory verifies that after a job runs, the run is appended
+// to the job's recent-run history (state.json "recent_runs"), carrying the run
+// status and the session id.
+func TestJobsRecentRunsHistory(t *testing.T) {
+	h := harness.Start(t, harness.Meta{
+		Category:    "jobs",
+		Subcategory: "jobs.recent_runs",
+		Description: "a job run is appended to state.json recent_runs history",
+		Wire:        harness.WireMessages,
+	},
+		harness.WithEnv("VIX_DISABLE_JOBS", "0"),
+		harness.WithHomeFile(".vix/jobs/e2e-recent/job.json", recentRunsSpec),
+	)
+
+	h.Mock.Enqueue(harness.Text("hello from the scheduled job"))
+
+	h.UI.WaitStable(500 * time.Millisecond)
+
+	statePath := h.HomePath(".vix/jobs/e2e-recent/state.json")
+	var state string
+	if !pollUntil(20*time.Second, func() bool {
+		b, err := os.ReadFile(statePath)
+		if err != nil {
+			return false
+		}
+		state = string(b)
+		return strings.Contains(state, `"recent_runs"`) &&
+			strings.Contains(state, `"status": "ok"`)
+	}) {
+		t.Fatalf("recent_runs history missing or not ok at %s; got:\n%s\nvixd log:\n%s",
+			statePath, state, h.Daemon.LogTail(80))
+	}
+
+	h.UI.Shot("recent-runs")
+}

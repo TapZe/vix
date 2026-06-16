@@ -141,6 +141,13 @@ type JobSnapshot struct {
 	AutoDirs       bool    `json:"auto_dirs"`
 	Timeout        string  `json:"timeout"`
 	CreatedBy      string  `json:"created_by"`
+
+	// Runtime history, attached from the job's persisted State. LastRunAt is the
+	// zero time when the job has never run; RecentRuns is newest-last, capped at
+	// maxRecentRuns.
+	LastRunAt  time.Time   `json:"last_run_at,omitempty"`
+	LastStatus string      `json:"last_status,omitempty"`
+	RecentRuns []RunRecord `json:"recent_runs,omitempty"`
 }
 
 // Snapshot returns the current set of job specs as read-only views, sorted by
@@ -154,7 +161,7 @@ func (s *Scheduler) Snapshot() []JobSnapshot {
 		if timeout == "" {
 			timeout = "10m" // documented default (DefaultTimeout)
 		}
-		out = append(out, JobSnapshot{
+		snap := JobSnapshot{
 			ID:             id,
 			Name:           spec.Name,
 			Enabled:        spec.Enabled,
@@ -167,7 +174,13 @@ func (s *Scheduler) Snapshot() []JobSnapshot {
 			AutoDirs:       spec.AutoDirs(),
 			Timeout:        timeout,
 			CreatedBy:      spec.CreatedBy,
-		})
+		}
+		if st := s.state[id]; st != nil {
+			snap.LastRunAt = st.LastRunAt
+			snap.LastStatus = st.LastStatus
+			snap.RecentRuns = append([]RunRecord(nil), st.RecentRuns...)
+		}
+		out = append(out, snap)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -498,6 +511,7 @@ func (s *Scheduler) applyCatchupLocked(now time.Time) {
 		st := s.state[id]
 		st.LastStatus = StatusSkipped
 		st.LastError = "missed while the daemon was down"
+		st.appendRun(RunRecord{At: now, Status: StatusSkipped, Error: "missed while the daemon was down"})
 		spec := s.specs[id]
 		if next, ok := spec.NextRun(now); ok {
 			st.NextRunAt = next
@@ -551,7 +565,7 @@ func (s *Scheduler) execute(ctx context.Context, spec Spec, manual bool) {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
 	case <-ctx.Done():
-		s.applyResult(spec, RunResult{Status: StatusSkipped, Err: "daemon shutting down"}, manual)
+		s.applyResult(spec, RunResult{Status: StatusSkipped, Err: "daemon shutting down"}, manual, 0)
 		return
 	}
 
@@ -561,12 +575,12 @@ func (s *Scheduler) execute(ctx context.Context, spec Spec, manual bool) {
 	// loader inlines an error marker; never send that to the model.
 	missingFile := strings.Contains(resolved, "[Error: file ")
 	if spec.SkipIfEmpty && (missingFile || effectivelyEmpty(resolved)) {
-		s.applyResult(spec, RunResult{Status: StatusSkipped}, manual)
+		s.applyResult(spec, RunResult{Status: StatusSkipped}, manual, 0)
 		return
 	}
 	if missingFile {
 		s.logError(spec, "", "prompt_resolve", "prompt file not found")
-		s.applyResult(spec, RunResult{Status: StatusError, Err: "prompt file not found"}, manual)
+		s.applyResult(spec, RunResult{Status: StatusError, Err: "prompt file not found"}, manual, 0)
 		return
 	}
 
@@ -589,7 +603,7 @@ func (s *Scheduler) execute(ctx context.Context, spec Spec, manual bool) {
 		s.logError(spec, res.SessionID, e.Source, e.Message)
 	}
 	s.logFinished(spec, res, time.Since(start))
-	s.applyResult(spec, res, manual)
+	s.applyResult(spec, res, manual, time.Since(start))
 }
 
 // logStarted/logError/logFinished forward to the injected RunLogger, guarding
@@ -612,12 +626,14 @@ func (s *Scheduler) logFinished(spec Spec, res RunResult, dur time.Duration) {
 	}
 }
 
-// applyResult records a finished run and computes the next fire time. When
-// manual is true (an on-demand RunNow), the run's outcome is recorded but the
-// schedule is left untouched: no rescheduling, no one-shot completion, and no
-// error-streak/auto-disable bookkeeping — a user-initiated test run must not
-// consume a one-shot or shift the next cron slot.
-func (s *Scheduler) applyResult(spec Spec, res RunResult, manual bool) {
+// applyResult records a finished run and computes the next fire time. The run
+// is appended to State.RecentRuns (newest last, capped at maxRecentRuns) with
+// its wall-clock duration. When manual is true (an on-demand RunNow), the run's
+// outcome is recorded but the schedule is left untouched: no rescheduling, no
+// one-shot completion, and no error-streak/auto-disable bookkeeping — a
+// user-initiated test run must not consume a one-shot or shift the next cron
+// slot.
+func (s *Scheduler) applyResult(spec Spec, res RunResult, manual bool, dur time.Duration) {
 	now := time.Now()
 	s.mu.Lock()
 	delete(s.running, spec.ID)
@@ -631,6 +647,11 @@ func (s *Scheduler) applyResult(spec Spec, res RunResult, manual bool) {
 	if res.SessionID != "" {
 		st.LastSessionID = res.SessionID
 	}
+	rec := RunRecord{At: now, Status: res.Status, Error: res.Err, SessionID: res.SessionID}
+	if dur > 0 {
+		rec.Duration = dur.String()
+	}
+	st.appendRun(rec)
 
 	if manual {
 		s.persistLocked()

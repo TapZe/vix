@@ -38,6 +38,10 @@ func TestVixPaths_NormalMode(t *testing.T) {
 		t.Errorf("HooksLog = %q", got)
 	}
 
+	if got := p.HeartbeatMD(); got != filepath.Join("/home/.vix", "jobs", "heartbeat", "heartbeat.md") {
+		t.Errorf("HeartbeatMD = %q", got)
+	}
+
 	if got := p.AccessStatsDB(); got != filepath.Join("/project", ".vix", "access_stats.db") {
 		t.Errorf("AccessStatsDB = %q", got)
 	}
@@ -120,6 +124,10 @@ func TestVixPaths_OverrideMode(t *testing.T) {
 		t.Errorf("HooksLog = %q", got)
 	}
 
+	if got := p.HeartbeatMD(); got != filepath.Join("/custom", "jobs", "heartbeat", "heartbeat.md") {
+		t.Errorf("HeartbeatMD = %q", got)
+	}
+
 	if got := p.AccessStatsDB(); got != filepath.Join("/custom", "access_stats.db") {
 		t.Errorf("AccessStatsDB = %q", got)
 	}
@@ -164,5 +172,8 @@ func TestVixPaths_NormalModeWithoutHome(t *testing.T) {
 	}
 	if got := p.HooksLog(); got != "" {
 		t.Errorf("HooksLog should be empty without home, got %q", got)
+	}
+	if got := p.HeartbeatMD(); got != "" {
+		t.Errorf("HeartbeatMD should be empty without home, got %q", got)
 	}
 }

@@ -349,7 +349,7 @@ func seedDefaultHeartbeat(jobsDir, heartbeatPath string) {
 		Name:    "Heartbeat",
 		Enabled: true,
 		Trigger: jobs.Trigger{Type: "cron", Expr: "*/30 9-19 * * *"},
-		Prompt: "$(file:.vix/heartbeat.md)\n\n" +
+		Prompt: "$(file:.vix/jobs/heartbeat/heartbeat.md)\n\n" +
 			"Follow it strictly. Do not infer tasks from prior conversations. " +
 			"If nothing needs attention, reply HEARTBEAT_OK.",
 		WorkflowID:  "heartbeat",

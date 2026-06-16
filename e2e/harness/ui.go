@@ -49,8 +49,11 @@ func (h *Harness) startTUI(cfg *config) {
 	sb.WriteString("cd " + shellQuote(h.workdir) + "\n")
 	sb.WriteString("exec " + shellQuote(bin) +
 		" -socket-path " + shellQuote(h.socket) +
-		" -workdir " + shellQuote(h.workdir) +
-		" 2> " + shellQuote(h.clientLog) + "\n")
+		" -workdir " + shellQuote(h.workdir))
+	for _, a := range cfg.tuiArgs {
+		sb.WriteString(" " + shellQuote(a))
+	}
+	sb.WriteString(" 2> " + shellQuote(h.clientLog) + "\n")
 	mustWrite(t, script, sb.String())
 	_ = os.Chmod(script, 0o755)
 

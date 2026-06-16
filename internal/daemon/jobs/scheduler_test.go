@@ -645,3 +645,127 @@ func TestBackoffFor(t *testing.T) {
 		t.Fatalf("backoff(20) = %v", backoffFor(20))
 	}
 }
+
+// ── RecentRuns history ──
+
+// TestStateAppendRunCapsAndOrders verifies the per-job run history keeps the
+// most recent maxRecentRuns entries, newest last.
+func TestStateAppendRunCapsAndOrders(t *testing.T) {
+	var st State
+	for i := 0; i < maxRecentRuns+5; i++ {
+		st.appendRun(RunRecord{At: time.Unix(int64(i), 0), Status: StatusOK})
+	}
+	if len(st.RecentRuns) != maxRecentRuns {
+		t.Fatalf("len(RecentRuns) = %d, want %d", len(st.RecentRuns), maxRecentRuns)
+	}
+	// The oldest 5 must have been dropped: first kept is index 5, last is index 14.
+	if got := st.RecentRuns[0].At.Unix(); got != 5 {
+		t.Fatalf("oldest kept run At = %d, want 5", got)
+	}
+	if got := st.RecentRuns[len(st.RecentRuns)-1].At.Unix(); got != int64(maxRecentRuns+4) {
+		t.Fatalf("newest run At = %d, want %d", got, maxRecentRuns+4)
+	}
+}
+
+// TestSchedulerRecordsRecentRuns verifies that finished runs accumulate in
+// State.RecentRuns with their status, session id, and a duration string.
+func TestSchedulerRecordsRecentRuns(t *testing.T) {
+	dir := t.TempDir()
+	writeSpec(t, dir, validSpec("rec"))
+	runner := newTestRunner(nil)
+	sched := newTestScheduler(t, dir, runner)
+	sched.reconcile(time.Now())
+
+	sched.applyResult(validSpec("rec"), RunResult{Status: StatusOK, SessionID: "s1"}, false, 1500*time.Millisecond)
+	sched.applyResult(validSpec("rec"), RunResult{Status: StatusError, Err: "boom", SessionID: "s2"}, false, 2*time.Second)
+
+	sched.mu.Lock()
+	runs := append([]RunRecord(nil), sched.state["rec"].RecentRuns...)
+	sched.mu.Unlock()
+
+	if len(runs) != 2 {
+		t.Fatalf("RecentRuns len = %d, want 2", len(runs))
+	}
+	if runs[0].Status != StatusOK || runs[0].SessionID != "s1" || runs[0].Duration != "1.5s" {
+		t.Fatalf("run[0] = %+v, want ok/s1/1.5s", runs[0])
+	}
+	if runs[1].Status != StatusError || runs[1].Error != "boom" || runs[1].SessionID != "s2" {
+		t.Fatalf("run[1] = %+v, want error/boom/s2", runs[1])
+	}
+	if runs[0].At.IsZero() {
+		t.Fatal("run record must carry a timestamp")
+	}
+}
+
+// TestSchedulerRecentRunsPersist verifies the history round-trips through the
+// per-job state.json file.
+func TestSchedulerRecentRunsPersist(t *testing.T) {
+	dir := t.TempDir()
+	writeSpec(t, dir, validSpec("rec"))
+	runner := newTestRunner(nil)
+	sched := newTestScheduler(t, dir, runner)
+	sched.reconcile(time.Now())
+	sched.applyResult(validSpec("rec"), RunResult{Status: StatusOK, SessionID: "s1"}, false, time.Second)
+
+	st := NewStore(dir).LoadState()["rec"]
+	if st == nil || len(st.RecentRuns) != 1 || st.RecentRuns[0].SessionID != "s1" {
+		t.Fatalf("loaded RecentRuns = %+v, want one record for s1", st)
+	}
+}
+
+// TestSchedulerManualRunRecordsRecentRun verifies an on-demand run is recorded
+// in the history while leaving the schedule untouched (no one-shot completion).
+func TestSchedulerManualRunRecordsRecentRun(t *testing.T) {
+	dir := t.TempDir()
+	s := validSpec("once")
+	s.Trigger = Trigger{Type: "at", Time: time.Now().Add(time.Hour).Format(time.RFC3339)}
+	writeSpec(t, dir, s)
+	runner := newTestRunner(nil)
+	sched := newTestScheduler(t, dir, runner)
+	sched.reconcile(time.Now())
+
+	sched.applyResult(s, RunResult{Status: StatusOK, SessionID: "m1"}, true, time.Second)
+
+	sched.mu.Lock()
+	st := sched.state["once"]
+	sched.mu.Unlock()
+	if len(st.RecentRuns) != 1 || st.RecentRuns[0].SessionID != "m1" {
+		t.Fatalf("manual run not recorded: %+v", st.RecentRuns)
+	}
+	if st.Completed {
+		t.Fatal("manual run must not complete a one-shot")
+	}
+}
+
+// TestSchedulerCatchupRecordsSkip verifies overdue runs dropped by the
+// catch-up cap leave a skipped entry in the history.
+func TestSchedulerCatchupRecordsSkip(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ {
+		s := validSpec(string(rune('a' + i)))
+		s.Trigger = Trigger{Type: "at", Time: base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)}
+		writeSpec(t, dir, s)
+	}
+	store := NewStore(dir)
+	specs, _ := store.LoadSpecs()
+	for id, sp := range specs {
+		store.SaveStateFor(id, &State{NextRunAt: sp.AtTime(), SpecHash: SpecHash(sp)})
+	}
+	runner := newTestRunner(nil)
+	sched := NewScheduler(store, runner.fn, nil, nil, 2)
+	sched.resolvePrompt = func(spec Spec) string { return spec.Prompt }
+	sched.reconcile(time.Now())
+
+	sched.mu.Lock()
+	skippedWithHistory := 0
+	for _, st := range sched.state {
+		if st.LastStatus == StatusSkipped && len(st.RecentRuns) == 1 && st.RecentRuns[0].Status == StatusSkipped {
+			skippedWithHistory++
+		}
+	}
+	sched.mu.Unlock()
+	if skippedWithHistory != 3 {
+		t.Fatalf("catch-up skip history count = %d, want 3", skippedWithHistory)
+	}
+}

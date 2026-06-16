@@ -1,6 +1,8 @@
 package scenarios
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +16,8 @@ import (
 // written.
 //
 // Coverage: every event (PreToolUse, PostToolUse, UserPromptSubmit, SessionStart,
-// Stop), every decision (deny, modify, context), both modes (sync, async), the
+// Stop, PreCompact, PostCompact, SubagentStart, SubagentStop, PermissionRequest),
+// every decision (deny, modify, context), both modes (sync, async), the
 // command and prompt forms, plus matcher scoping, multi-hook combine
 // (most-restrictive-wins), the blocking gate, and the kill switch.
 
@@ -460,7 +463,56 @@ func TestHookStopFires(t *testing.T) {
 	}
 }
 
-// ── prompt form: a blocking hook backed by an LLM turn ───────────────────────
+// ── recent-run history (state.json) ──────────────────────────────────────────
+
+// recentRunsHook is a sync PostToolUse hook on bash; each fire is appended to
+// the hook's recent-run history (~/.vix/hooks/<id>/state.json).
+const recentRunsHook = `{
+  "id": "rec-runs",
+  "enabled": true,
+  "mode": "sync",
+  "trigger": { "event": "PostToolUse", "matcher": "bash" },
+  "command": "echo noted"
+}`
+
+// TestHookRecentRunsHistory proves a hook fire is recorded in its per-hook
+// state.json under recent_runs, carrying the event and async flag.
+func TestHookRecentRunsHistory(t *testing.T) {
+	h := harness.Start(t, harness.Meta{
+		Category:    "hooks",
+		Subcategory: "hooks.recent_runs",
+		Description: "a hook fire is appended to its state.json recent_runs history",
+		Wire:        harness.WireMessages,
+	}, harness.WithHomeFile(".vix/hooks/rec-runs/hook.json", recentRunsHook))
+
+	h.UI.WaitStable(400 * time.Millisecond)
+
+	h.Mock.Enqueue(
+		harness.ToolUse("bash", `{"command":"echo hi"}`),
+		harness.Text("Done."),
+	)
+	h.UI.Type("run echo hi")
+	h.UI.Enter()
+	h.WaitForLLMRequests(2) // bash turn + final turn
+
+	statePath := h.HomePath(".vix/hooks/rec-runs/state.json")
+	var state string
+	if !pollUntil(20*time.Second, func() bool {
+		b, err := os.ReadFile(statePath)
+		if err != nil {
+			return false
+		}
+		state = string(b)
+		return strings.Contains(state, `"recent_runs"`) &&
+			strings.Contains(state, `"event": "PostToolUse"`) &&
+			strings.Contains(state, `"async": false`)
+	}) {
+		t.Fatalf("hook recent_runs missing or incomplete at %s; got:\n%s\nvixd log:\n%s",
+			statePath, state, h.Daemon.LogTail(80))
+	}
+
+	h.UI.Shot("hook-recent-runs")
+}
 
 // promptFormHook is a sync blocking PreToolUse hook whose decision comes from an
 // LLM turn (run in an isolated session). The model answers with the BLOCK:
@@ -500,5 +552,162 @@ func TestHookPromptFormBlocks(t *testing.T) {
 
 	if h.FS.Exists("llm-blocked.txt") {
 		t.Fatalf("prompt-form hook failed to block: llm-blocked.txt was written")
+	}
+}
+
+// ── SubagentStop event ───────────────────────────────────────────────────────
+
+// subagentStopHook touches a marker when a "helper" subagent finishes.
+const subagentStopHook = `{
+  "id": "subagent-stop",
+  "enabled": true,
+  "mode": "async",
+  "trigger": { "event": "SubagentStop", "matcher": "helper" },
+  "command": "touch subagent-stopped.flag"
+}`
+
+// helperAgent is a minimal custom agent the model can delegate to via spawn_agent.
+const helperAgent = `---
+name: helper
+tools: bash
+---
+You are a helper agent.`
+
+// TestHookSubagentStopFires proves a SubagentStop hook fires when a spawned
+// subagent finishes, scoped by agent type.
+func TestHookSubagentStopFires(t *testing.T) {
+	h := harness.Start(t, harness.Meta{
+		Category:    "hooks",
+		Subcategory: "hooks.subagent_stop",
+		Description: "a SubagentStop hook fires when a spawned subagent finishes",
+		Wire:        harness.WireMessages,
+	},
+		harness.WithHomeFile(".vix/hooks/subagent-stop/hook.json", subagentStopHook),
+		harness.WithHomeFile(".vix/agents/helper.md", helperAgent),
+	)
+
+	h.UI.WaitStable(400 * time.Millisecond)
+
+	h.Mock.Enqueue(
+		harness.ToolUse("spawn_agent", `{"agent_type":"helper","prompt":"do a small task"}`), // parent turn 1
+		harness.Text("Subagent finished its work."),                                          // subagent turn
+		harness.Text("All done."),                                                            // parent turn 2
+	)
+	h.UI.Type("delegate to the helper agent")
+	h.UI.Enter()
+	h.UI.WaitFor("All done.")
+	h.UI.Shot("after-subagent")
+
+	if !pollUntil(10*time.Second, func() bool { return h.FS.Exists("subagent-stopped.flag") }) {
+		t.Fatalf("SubagentStop hook never fired (subagent-stopped.flag missing)")
+	}
+}
+
+// ── PreCompact / PostCompact events ──────────────────────────────────────────
+
+const preCompactHook = `{
+  "id": "pre-compact",
+  "enabled": true,
+  "mode": "async",
+  "trigger": { "event": "PreCompact" },
+  "command": "touch precompact.flag"
+}`
+
+const postCompactHook = `{
+  "id": "post-compact",
+  "enabled": true,
+  "mode": "async",
+  "trigger": { "event": "PostCompact" },
+  "command": "touch postcompact.flag"
+}`
+
+// TestHookCompactionFires proves PreCompact and PostCompact hooks fire around a
+// manual /compact (which summarizes the dropped prefix in one LLM call).
+func TestHookCompactionFires(t *testing.T) {
+	h := harness.Start(t, harness.Meta{
+		Category:    "hooks",
+		Subcategory: "hooks.compact",
+		Description: "PreCompact and PostCompact hooks fire around a /compact",
+		Wire:        harness.WireMessages,
+	},
+		harness.WithHomeFile(".vix/hooks/pre-compact/hook.json", preCompactHook),
+		harness.WithHomeFile(".vix/hooks/post-compact/hook.json", postCompactHook),
+	)
+
+	h.UI.WaitStable(400 * time.Millisecond)
+
+	h.Mock.Enqueue(harness.Text("Turn one."))
+	h.UI.Type("first message")
+	h.UI.Enter()
+	h.UI.WaitFor("Turn one.")
+
+	h.Mock.Enqueue(harness.Text("Turn two."))
+	h.UI.Type("second message")
+	h.UI.Enter()
+	h.UI.WaitFor("Turn two.")
+	h.UI.WaitStable(300 * time.Millisecond)
+
+	// /compact 1 drops the first turn and summarizes it (one summarization call).
+	h.Mock.Enqueue(harness.Text("COMPACTION_SUMMARY"))
+	h.UI.Type("/compact 1")
+	h.UI.WaitStable(300 * time.Millisecond)
+	h.UI.Key("esc")
+	h.UI.WaitStable(200 * time.Millisecond)
+	h.UI.Enter()
+	h.UI.WaitStable(300 * time.Millisecond)
+	h.UI.Shot("after-compact")
+
+	if !pollUntil(10*time.Second, func() bool { return h.FS.Exists("precompact.flag") }) {
+		t.Fatalf("PreCompact hook never fired (precompact.flag missing)")
+	}
+	if !pollUntil(10*time.Second, func() bool { return h.FS.Exists("postcompact.flag") }) {
+		t.Fatalf("PostCompact hook never fired (postcompact.flag missing)")
+	}
+}
+
+// ── PermissionRequest event ──────────────────────────────────────────────────
+
+// permDenyHook is a blocking PermissionRequest hook that denies any write_file
+// confirmation, so the user is never prompted and the tool is rejected.
+const permDenyHook = `{
+  "id": "perm-deny",
+  "enabled": true,
+  "mode": "sync",
+  "blocking": true,
+  "trigger": { "event": "PermissionRequest", "matcher": "write_file" },
+  "command": "echo 'writes require a ticket' >&2; exit 2"
+}`
+
+// TestHookPermissionRequestDenies proves a blocking PermissionRequest hook
+// short-circuits the confirmation prompt: the write never lands and the deny
+// reason reaches the model.
+func TestHookPermissionRequestDenies(t *testing.T) {
+	h := harness.Start(t, harness.Meta{
+		Category:    "hooks",
+		Subcategory: "hooks.permission_request",
+		Description: "a blocking PermissionRequest hook denies a write confirmation; the file never lands and the reason reaches the model",
+		Wire:        harness.WireMessages,
+	},
+		// write_file must surface a confirmation prompt for a PermissionRequest
+		// hook to fire; the harness default runs with automatic write permission.
+		harness.WithVixArgs("-disable-automatic-write-permission"),
+		harness.WithHomeFile(".vix/hooks/perm-deny/hook.json", permDenyHook))
+
+	h.UI.WaitStable(400 * time.Millisecond)
+
+	h.Mock.Enqueue(
+		harness.ToolUse("write_file", `{"path":"needs-perm.txt","content":"x"}`),
+		harness.Text("I could not write that file."),
+	)
+	h.UI.Type("write needs-perm.txt")
+	h.UI.Enter()
+	h.WaitForLLMRequests(2) // denied write turn + final turn
+	h.UI.Shot("perm-denied")
+
+	if h.FS.Exists("needs-perm.txt") {
+		t.Fatalf("permission hook deny breached: needs-perm.txt was written")
+	}
+	if !anyToolResultContains(h, "writes require a ticket") {
+		t.Fatalf("permission deny reason did not reach the model (requests=%d)", len(h.Mock.Requests()))
 	}
 }
