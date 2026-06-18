@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,6 +27,11 @@ type HandlerFunc func(data map[string]any) (map[string]any, error)
 type SessionInfo struct {
 	ID            string  `json:"id"`
 	CWD           string  `json:"cwd"`
+	Model         string  `json:"model,omitempty"`
+	Title         string  `json:"title,omitempty"`
+	Origin        string  `json:"origin,omitempty"`
+	Unread        bool    `json:"unread,omitempty"`
+	Attached      bool    `json:"attached"`
 	InputTokens   int64   `json:"input_tokens"`
 	OutputTokens  int64   `json:"output_tokens"`
 	StartedAt     string  `json:"started_at"`      // RFC3339
@@ -948,15 +954,20 @@ func (s *Server) notifySubscribers() {
 	}
 }
 
-// Sessions returns a snapshot of all currently active sessions.
+// Sessions returns a snapshot of live sessions plus persisted open sessions.
 func (s *Server) Sessions() []SessionInfo {
 	s.sessionMu.Lock()
-	defer s.sessionMu.Unlock()
 	infos := make([]SessionInfo, 0, len(s.sessions))
+	liveIDs := make(map[string]struct{}, len(s.sessions))
 	for _, sess := range s.sessions {
 		info := SessionInfo{
 			ID:           sess.id,
 			CWD:          sess.cwd,
+			Model:        sess.model,
+			Title:        sess.title,
+			Origin:       sess.origin,
+			Unread:       sess.unread,
+			Attached:     true,
 			InputTokens:  sess.totalInputTokens,
 			OutputTokens: sess.totalOutputTokens,
 			StartedAt:    sess.startTime.Format(time.RFC3339),
@@ -968,7 +979,40 @@ func (s *Server) Sessions() []SessionInfo {
 			info.LastRequestAt = &t
 		}
 		infos = append(infos, info)
+		liveIDs[sess.id] = struct{}{}
 	}
+	s.sessionMu.Unlock()
+
+	paths := config.NewVixPaths("", s.homeVixDir, "")
+	for _, rec := range listOpenSessionRecords(paths) {
+		if _, live := liveIDs[rec.ID]; live {
+			continue
+		}
+		info := SessionInfo{
+			ID:           rec.ID,
+			CWD:          rec.CWD,
+			Model:        rec.Model,
+			Title:        rec.Title,
+			Origin:       rec.Origin,
+			Unread:       rec.Unread,
+			InputTokens:  rec.TotalInputTokens,
+			OutputTokens: rec.TotalOutputTokens,
+			ParentID:     rec.ParentID,
+			ForkTurnIdx:  rec.ForkTurnIdx,
+		}
+		if !rec.StartedAt.IsZero() {
+			info.StartedAt = rec.StartedAt.Format(time.RFC3339)
+		}
+		if !rec.LastRequestAt.IsZero() {
+			t := rec.LastRequestAt.Format(time.RFC3339)
+			info.LastRequestAt = &t
+		}
+		infos = append(infos, info)
+	}
+
+	sort.SliceStable(infos, func(i, j int) bool {
+		return infos[i].StartedAt < infos[j].StartedAt
+	})
 	return infos
 }
 
@@ -1040,6 +1084,74 @@ func (s *Server) getSession(id string) *Session {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 	return s.sessions[id]
+}
+
+// sessionForWebCall returns a live session when one is attached, otherwise it
+// restores an open persisted session into a short-lived headless session for
+// web-only operations such as whiteboard code exploration.
+func (s *Server) sessionForWebCall(id string) (*Session, func(), error) {
+	if sess := s.getSession(id); sess != nil {
+		return sess, nil, nil
+	}
+
+	paths := config.NewVixPaths("", s.homeVixDir, "")
+	rec, found, err := loadOpenSessionRecord(paths, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !found {
+		return nil, nil, nil
+	}
+
+	cwd := rec.CWD
+	if cwd == "" {
+		cwd = s.cwd
+	}
+	if cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+	}
+
+	model := rec.Model
+	if model == "" {
+		model = s.model
+	}
+
+	parentCtx := s.serverCtx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	sess := NewSession(rec.ID, s, nil, model, cwd, "", false, false, false, true, parentCtx)
+	sess.seedFromRecord(&rec)
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			select {
+			case <-sess.eventChan:
+			case <-sess.ctx.Done():
+				return
+			}
+		}
+	}()
+
+	sess.initBrain()
+
+	cleanup := func() {
+		sess.cancel()
+		sess.closeThinkingLog()
+		if sess.mcpPool != nil {
+			sess.mcpPool.Shutdown()
+		}
+		select {
+		case <-drained:
+		case <-time.After(time.Second):
+		}
+	}
+
+	return sess, cleanup, nil
 }
 
 // Shutdown gracefully closes all server resources.
