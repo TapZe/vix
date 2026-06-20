@@ -273,6 +273,15 @@ type pendingPlanAction struct {
 	text   string
 }
 
+func markCancelledReadyForInput(sess *SessionState) {
+	sess.thinkingAnim.Stop()
+	sess.pendingInput = nil
+	sess.cancelAckPending = true
+	sess.agentState = StateWaitingForInput
+	sess.focus = FocusEditor
+	sess.input.Focus()
+}
+
 // Model is the root Bubble Tea model.
 type Model struct {
 	width, height int
@@ -1015,8 +1024,7 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "esc":
 			if sess.agentState == StateStreaming || sess.agentState == StateToolExecuting || sess.agentState == StatePlanExecuting {
-				sess.thinkingAnim.Stop()
-				sess.pendingInput = nil
+				markCancelledReadyForInput(sess)
 				if sess.client != nil {
 					sess.client.SendCancel()
 				}
@@ -2621,6 +2629,12 @@ func (m *Model) applyEventToSession(idx int, event protocol.SessionEvent) []tea.
 		}
 
 	case "event.agent_done":
+		if sess.cancelAckPending && sess.pendingInput == nil &&
+			(sess.agentState == StateStreaming || sess.agentState == StateToolExecuting || sess.agentState == StatePlanExecuting) {
+			sess.cancelAckPending = false
+			return cmds
+		}
+		sess.cancelAckPending = false
 		sess.thinkingAnim.Stop()
 		m.flushSessionBuf(sess)
 		if idx != m.selectedSession || m.activeTab != TabKindChat {

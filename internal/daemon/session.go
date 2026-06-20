@@ -1889,6 +1889,7 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 
 	// Inner loop: agent turns
 	todoNudges := 0
+	deferredToolNudges := 0
 	for {
 		s.maybeAutoCompact()
 		system := s.buildSystemPrompt()
@@ -1927,6 +1928,12 @@ func (s *Session) handleInput(text string, attachments []protocol.Attachment) {
 		s.appendMessages(msg.ToParam())
 
 		if msg.StopReason == llm.StopEndTurn {
+			if deferredToolNudges < maxDeferredToolNudges && shouldNudgeDeferredToolUse(msg, s.tools) {
+				deferredToolNudges++
+				log.Printf("\033[33m[session] end_turn after deferred tool plan; nudging (%d/%d)\033[0m", deferredToolNudges, maxDeferredToolNudges)
+				s.appendMessages(deferredToolUseNudge())
+				continue
+			}
 			log.Printf("\033[34m[session] end of turn detected\033[0m")
 			s.endTurnCount++
 			if todoNudges < 3 && s.hasPendingTodos() {
@@ -2859,15 +2866,22 @@ func (s *Session) handleSpawnAgent(ctx context.Context, input map[string]any) (s
 // It is intended for external callers such as the web API that need to run an
 // agent on behalf of the session without going through the normal command loop.
 func (s *Session) RunExploration(ctx context.Context, agentName, prompt string) (*SubagentResult, error) {
-	config, ok := s.customAgents[agentName]
+	agentConfig, ok := s.customAgents[agentName]
 	if !ok {
 		return nil, fmt.Errorf("unknown agent: %q", agentName)
+	}
+	if s.llm == nil && s.configErr != nil && agentConfig.Model == "" {
+		return nil, errors.New(s.unconfiguredMessage())
+	}
+	cred := config.Credential{}
+	if s.llm != nil {
+		cred = s.llm.Credential()
 	}
 	executeTool := func(name string, params map[string]any, cwd string) (*ToolResult, error) {
 		return s.executeToolConfirmed(ctx, name, params), nil
 	}
 	def, maxv := s.toolTimeoutBounds()
-	return RunSubagent(ctx, config, prompt, s.llm.Credential(), s.model, s.server.plugins, executeTool, s.cwd, nil, def, maxv, s.searchDirsSlice()...)
+	return RunSubagent(ctx, agentConfig, prompt, cred, s.model, s.server.plugins, executeTool, s.cwd, nil, def, maxv, s.searchDirsSlice()...)
 }
 
 func (s *Session) handleTaskOutput(ctx context.Context, input map[string]any) (string, bool) {
