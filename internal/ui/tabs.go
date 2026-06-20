@@ -229,7 +229,7 @@ func renderSessionsView(userSessions []*SessionState, vixRows []vixDisplayRow, w
 
 		// vixCols formats the three shared columns of a vix-initiated row from
 		// its record summary (id, Title, ran ago). A titled record shows the
-		// bare title (e.g. the per-item GitHub-plan title), with a ⚠️ marker when
+		// bare title (e.g. the per-item GitHub-plan title), with a ⚠ marker when
 		// the run failed; an untitled record (a raw alert) falls back to the
 		// "<job> · <status>  <first message>" form.
 		vixCols := func(sum protocol.SessionSummary) string {
@@ -258,7 +258,7 @@ func renderSessionsView(userSessions []*SessionState, vixRows []vixDisplayRow, w
 				}
 			}
 			// Rune-aware truncate, then pad to the column's display width so the
-			// Running column stays aligned even when a wide glyph (⚠️) is present.
+			// Running column stays aligned even when a wide glyph (⚠) is present.
 			msgCol = truncateLabel(msgCol, colMessage)
 			if pad := colMessage - lipgloss.Width(msgCol); pad > 0 {
 				msgCol += strings.Repeat(" ", pad)
@@ -315,11 +315,17 @@ func renderSessionsView(userSessions []*SessionState, vixRows []vixDisplayRow, w
 }
 
 // vixRowTitle returns the Title-column text for a titled vix-initiated row: the
-// bare session title, prefixed with a ⚠️ marker when the run failed (error or
+// bare session title, prefixed with a ⚠ marker when the run failed (error or
 // timeout). Callers handle the untitled (raw-alert) fallback separately.
+//
+// The marker is the plain warning sign U+26A0 (no U+FE0F variation selector):
+// lipgloss and terminals agree it is one cell wide, so the padded Title column
+// keeps the Running column aligned. The emoji-presentation "⚠️" measures as two
+// cells in lipgloss but renders as one in many terminals, which shifts the
+// Running column left on flagged rows.
 func vixRowTitle(sum protocol.SessionSummary) string {
 	if st := sum.JobStatus; st == "error" || st == "timeout" {
-		return "⚠️  " + sum.Title
+		return "⚠ " + sum.Title
 	}
 	return sum.Title
 }
