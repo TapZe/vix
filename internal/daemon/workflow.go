@@ -1990,6 +1990,15 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 				})
 			}
 
+			// Make this bash step's own output visible to its next_steps
+			// execute_if guards (e.g. `[[ "$(step.self)" != *NO_TODO* ]]`).
+			// vars was snapshotted before the step ran, so re-merge the step
+			// results now — otherwise `$(step.self)` is left unsubstituted and
+			// evaluateExecuteIf runs it as a bogus (empty) command substitution.
+			for k, v := range buildStepVars(exec.StepResults) {
+				vars[k] = v
+			}
+
 			// Advance to next step(s)
 			if len(step.NextSteps) > 0 {
 				if len(step.NextSteps) == 1 {
@@ -2091,6 +2100,12 @@ func (s *Session) executeWorkflow(ctx context.Context, pf *WorkflowDef, prompt s
 				Success:    true,
 				DurationMs: stepElapsed,
 			})
+
+			// Make this tool step's own output visible to its next_steps
+			// execute_if guards: toolVars was snapshotted before the step ran.
+			for k, v := range buildStepVars(exec.StepResults) {
+				toolVars[k] = v
+			}
 
 			if len(nextRefs) > 0 {
 				// Check for stop
