@@ -292,7 +292,6 @@
         { "spec": "openrouter/morph/morph-v3-fast", "display_name": "Morph Morph v3 Fast", "context_window": 81920 },
         { "spec": "openrouter/morph/morph-v3-large", "display_name": "Morph Morph v3 Large", "context_window": 262144 },
         { "spec": "openrouter/nex-agi/nex-n2-pro", "display_name": "Nex Agi Nex N2 Pro", "context_window": 262144 },
-        { "spec": "openrouter/nex-agi/nex-n2-pro:free", "display_name": "Nex Agi Nex N2 Pro:free", "context_window": 262144 },
         { "spec": "openrouter/nousresearch/hermes-3-llama-3.1-405b", "display_name": "Nousresearch Hermes 3 Llama 3.1 405b", "context_window": 131072 },
         { "spec": "openrouter/nousresearch/hermes-3-llama-3.1-405b:free", "display_name": "Nousresearch Hermes 3 Llama 3.1 405b:free", "context_window": 131072 },
         { "spec": "openrouter/nousresearch/hermes-3-llama-3.1-70b", "display_name": "Nousresearch Hermes 3 Llama 3.1 70b", "context_window": 131072 },
