@@ -672,6 +672,7 @@ func bashImpl(ctx context.Context, server *Server, command, cwd string, extraDir
 func runBashWithContext(ctx context.Context, command, cwd, input string, onLine func(string)) (string, error) {
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = cwd
+	cmd.Env = sanitizedBashEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)

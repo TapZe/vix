@@ -1155,6 +1155,7 @@ func resolveBashExpansions(s string, cwd string) string {
 		var replacement string
 		c := osexec.Command("bash", "-c", cmd)
 		c.Dir = cwd
+		c.Env = sanitizedBashEnv()
 		out, err := c.CombinedOutput()
 		if err == nil {
 			replacement = strings.TrimRight(string(out), "\n")
@@ -1173,6 +1174,7 @@ func evaluateExecuteIf(condition string, cwd string) bool {
 	}
 	c := osexec.Command("bash", "-c", condition)
 	c.Dir = cwd
+	c.Env = sanitizedBashEnv()
 	err := c.Run()
 	// Exit code 0 → condition true → run this step.
 	return err == nil
