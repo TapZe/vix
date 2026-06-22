@@ -1035,6 +1035,104 @@ func (s *Server) Hooks() []hooks.HookSnapshot {
 	return s.hookRegistry.Snapshot()
 }
 
+// JobSummaries projects the scheduled jobs into the lightweight wire form
+// consumed by the TUI's Jobs & Triggers tab (job.list RPC).
+func (s *Server) JobSummaries() []protocol.JobSummary {
+	snaps := s.Jobs()
+	out := make([]protocol.JobSummary, 0, len(snaps))
+	for _, j := range snaps {
+		sum := protocol.JobSummary{
+			ID:          j.ID,
+			Name:        j.Name,
+			Enabled:     j.Enabled,
+			TriggerType: j.Trigger.Type,
+			Schedule:    jobScheduleLabel(j.Trigger),
+			LastStatus:  j.LastStatus,
+			Running:     j.Running,
+			CreatedBy:   j.CreatedBy,
+		}
+		if !j.NextRunAt.IsZero() {
+			sum.NextRunAt = j.NextRunAt.Format(time.RFC3339)
+		}
+		if !j.LastRunAt.IsZero() {
+			sum.LastRunAt = j.LastRunAt.Format(time.RFC3339)
+		}
+		out = append(out, sum)
+	}
+	return out
+}
+
+// jobScheduleLabel renders a trigger as a short human-readable schedule string:
+// the cron expression (with timezone when set) for recurring jobs, or
+// "at <time>" for one-shots.
+func jobScheduleLabel(t jobs.Trigger) string {
+	switch t.Type {
+	case "cron":
+		if t.TZ != "" {
+			return t.Expr + " (" + t.TZ + ")"
+		}
+		return t.Expr
+	case "at":
+		return "at " + t.Time
+	}
+	return t.Type
+}
+
+// HookSummaries projects the lifecycle hooks into the lightweight wire form
+// consumed by the TUI's Jobs & Triggers tab (hook.list RPC). LastStatus is taken
+// from the most recent run record.
+func (s *Server) HookSummaries() []protocol.HookSummary {
+	snaps := s.Hooks()
+	out := make([]protocol.HookSummary, 0, len(snaps))
+	for _, h := range snaps {
+		sum := protocol.HookSummary{
+			ID:        h.ID,
+			Name:      h.Name,
+			Enabled:   h.Enabled,
+			Event:     h.Trigger.Event,
+			Matcher:   h.Trigger.Matcher,
+			Mode:      h.Mode,
+			CreatedBy: h.CreatedBy,
+		}
+		if !h.LastFiredAt.IsZero() {
+			sum.LastFiredAt = h.LastFiredAt.Format(time.RFC3339)
+		}
+		if n := len(h.RecentRuns); n > 0 {
+			sum.LastStatus = h.RecentRuns[n-1].Status
+		}
+		out = append(out, sum)
+	}
+	return out
+}
+
+// SetJobEnabled enables or disables a scheduled job by id, persisting the change
+// to its job.json and notifying attached clients. Errors when the jobs engine is
+// disabled or the spec cannot be patched.
+func (s *Server) SetJobEnabled(id string, enabled bool) error {
+	if s.jobScheduler == nil {
+		return fmt.Errorf("jobs engine is disabled")
+	}
+	if err := s.jobScheduler.SetEnabled(id, enabled); err != nil {
+		return err
+	}
+	s.broadcastJobsChanged()
+	return nil
+}
+
+// SetHookEnabled enables or disables a lifecycle hook by id, persisting the
+// change to its hook.json and notifying attached clients. Errors when the hooks
+// engine is disabled or the spec cannot be patched.
+func (s *Server) SetHookEnabled(id string, enabled bool) error {
+	if s.hookRegistry == nil {
+		return fmt.Errorf("hooks engine is disabled")
+	}
+	if err := s.hookRegistry.SetEnabled(id, enabled); err != nil {
+		return err
+	}
+	s.broadcastJobsChanged()
+	return nil
+}
+
 // DefaultCWD returns vixd's own working directory, offered to the web UI as the
 // default working directory for newly created jobs.
 func (s *Server) DefaultCWD() string {

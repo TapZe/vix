@@ -55,6 +55,41 @@ func TestVixRowTitleMarkerWidth(t *testing.T) {
 		t.Errorf("marker width = %d cells, want 2", got)
 	}
 }
+
+// TestRenderJobsView covers the Jobs & Triggers tab: the header blurb (with the
+// docs link and prompt example), the two grouped sections, the enabled
+// checkboxes, and the running spinner shown for jobs only.
+func TestRenderJobsView(t *testing.T) {
+	s := NewStyles(true)
+	jobs := []protocol.JobSummary{
+		{ID: "alpha", Name: "Alpha", Enabled: true, Schedule: "@every 1m", NextRunAt: "2999-01-01T00:00:00Z"},
+		{ID: "beta", Name: "Beta", Enabled: false, Schedule: "@daily"},
+		{ID: "gamma", Name: "Gamma", Enabled: true, Running: true},
+	}
+	hooks := []protocol.HookSummary{
+		{ID: "guard", Name: "Guard", Enabled: true, Event: "PreToolUse"},
+	}
+	out := renderJobsView(jobs, hooks, 120, 40, s, 0, "⠙")
+
+	for _, want := range []string{
+		jobsTabDocURL,          // docs link
+		"Every weekday at 9am", // prompt example
+		"Jobs", "Triggers",     // group headers
+		"Alpha", "Beta", "Gamma", "Guard",
+		"[✓]", "[ ]", // enabled + disabled checkboxes
+		"PreToolUse",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderJobsView output missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// The running job (gamma) drives the spinner glyph; hooks never do.
+	if !strings.Contains(out, "⠙") {
+		t.Errorf("running job should render the spinner glyph\n%s", out)
+	}
+}
+
 func TestTruncateLabel(t *testing.T) {
 	cases := []struct {
 		in   string

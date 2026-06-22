@@ -310,6 +310,13 @@ type Model struct {
 	// for this cwd, rendered as their own group below the live sessions.
 	// Refreshed on Init, on entering the tab, and on event.sessions_changed.
 	vixSessions []protocol.SessionSummary
+
+	// Jobs & Triggers tab UI: the scheduled jobs and lifecycle hooks, refreshed
+	// on entering the tab and on event.jobs_changed. jobsSelected is a single
+	// cursor spanning the Jobs group then the Triggers group.
+	jobs         []protocol.JobSummary
+	hooks        []protocol.HookSummary
+	jobsSelected int
 	// focusRestoredID, when set, names a session the user just opened from
 	// the Sessions tab (enter on a vix-initiated row): the matching
 	// sessionRestoredMsg focuses it instead of restoring in the background.
@@ -585,14 +592,14 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.commandPalette.IsVisible() {
 			action, _ := m.commandPalette.Update(msg)
 			cmds = append(cmds, m.handleCommandAction(action, sess)...)
-			if !m.commandPalette.IsVisible() && sess != nil && sess.focus != FocusRightPanel && m.activeTab != TabKindSessions && m.activeTab != TabKindModels && m.activeTab != TabKindSettings {
+			if !m.commandPalette.IsVisible() && sess != nil && sess.focus != FocusRightPanel && m.activeTab != TabKindSessions && m.activeTab != TabKindModels && m.activeTab != TabKindJobs && m.activeTab != TabKindSettings {
 				sess.input.Focus()
 				sess.focus = FocusEditor
 			}
 			return m, tea.Batch(cmds...)
 		}
 
-		// --- Tab switching (F1–F4), shared across all tabs/focus ---
+		// --- Tab switching (F1–F5), shared across all tabs/focus ---
 		switch msg.String() {
 		case "f1":
 			return m, m.switchTab(TabKindSessions)
@@ -601,6 +608,8 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f3":
 			return m, m.switchTab(TabKindModels)
 		case "f4":
+			return m, m.switchTab(TabKindJobs)
+		case "f5":
 			return m, m.switchTab(TabKindSettings)
 		}
 
@@ -729,6 +738,36 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleModelsKey(msg)
 		}
 
+		// --- Jobs & Triggers tab key handling ---
+		if m.activeTab == TabKindJobs {
+			switch msg.String() {
+			case "up", "k":
+				if m.jobsSelected > 0 {
+					m.jobsSelected--
+				}
+				return m, nil
+			case "down", "j":
+				if n := len(m.jobs) + len(m.hooks); m.jobsSelected < n-1 {
+					m.jobsSelected++
+				}
+				return m, nil
+			case "space", " ":
+				// Toggle enabled on the selected job or hook. The cursor indexes
+				// jobs first, then hooks.
+				if m.jobsSelected < len(m.jobs) {
+					j := m.jobs[m.jobsSelected]
+					return m, setJobEnabled(m.socketPath, m.authToken, j.ID, !j.Enabled)
+				}
+				hi := m.jobsSelected - len(m.jobs)
+				if hi >= 0 && hi < len(m.hooks) {
+					h := m.hooks[hi]
+					return m, setHookEnabled(m.socketPath, m.authToken, h.ID, !h.Enabled)
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
 		// --- Settings tab key handling ---
 		if m.activeTab == TabKindSettings {
 			switch msg.String() {
@@ -821,7 +860,7 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					sess.input.SetValue(insert)
 					sess.input.MoveToEnd()
 					sess.input.SetHeight(1)
-					if sess.focus != FocusRightPanel && m.activeTab != TabKindSessions && m.activeTab != TabKindModels && m.activeTab != TabKindSettings {
+					if sess.focus != FocusRightPanel && m.activeTab != TabKindSessions && m.activeTab != TabKindModels && m.activeTab != TabKindJobs && m.activeTab != TabKindSettings {
 						sess.input.Focus()
 						sess.focus = FocusEditor
 					}
@@ -832,7 +871,7 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if action != "" {
 					cmds = append(cmds, m.handleCommandAction(action, sess)...)
 				}
-				if sess.focus != FocusRightPanel && m.activeTab != TabKindSessions && m.activeTab != TabKindModels && m.activeTab != TabKindSettings {
+				if sess.focus != FocusRightPanel && m.activeTab != TabKindSessions && m.activeTab != TabKindModels && m.activeTab != TabKindJobs && m.activeTab != TabKindSettings {
 					sess.input.Focus()
 					sess.focus = FocusEditor
 				}
@@ -1363,6 +1402,12 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case jobsListMsg:
+		m.jobs = msg.jobs
+		m.hooks = msg.hooks
+		m.clampJobsSelected()
+		return m, m.maybeStartSessionsSpinner()
+
 	case tea.PasteMsg:
 		if m.activeTab == TabKindModels && m.modelsInKeyInput {
 			if m.modelsKeyInputBaseURL && m.modelsKeyInputFocus == 1 {
@@ -1454,7 +1499,7 @@ func (m Model) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionsSpinnerStep++
 		// Re-gate every frame: keep ticking only while the list is visible and
 		// work is ongoing, otherwise stop (and bump gen so this loop dies).
-		if m.activeTab == TabKindSessions && m.hasBusySessions() {
+		if m.spinnerShouldRun() {
 			return m, m.sessionsSpinnerTick()
 		}
 		m.stopSessionsSpinner()
@@ -1510,8 +1555,8 @@ func (m *Model) markSessionRead(sess *SessionState) {
 // returning any command to run (e.g. resuming the chat thinking animation).
 func (m *Model) switchTab(k TabKind) tea.Cmd {
 	m.activeTab = k
-	if k != TabKindSessions {
-		// Leaving the Sessions tab: no reason to animate a list nobody sees.
+	if k != TabKindSessions && k != TabKindJobs {
+		// Leaving the list tabs: no reason to animate a list nobody sees.
 		m.stopSessionsSpinner()
 	}
 	switch k {
@@ -1530,8 +1575,26 @@ func (m *Model) switchTab(k TabKind) tea.Cmd {
 	case TabKindModels:
 		m.enterModelsTab()
 		return fetchLocalProviders(m.socketPath, m.authToken)
+	case TabKindJobs:
+		m.clampJobsSelected()
+		return tea.Batch(
+			m.maybeStartSessionsSpinner(),
+			fetchJobsAndHooks(m.socketPath, m.authToken),
+		)
 	}
 	return nil
+}
+
+// clampJobsSelected keeps the Jobs & Triggers cursor within the current row
+// count (jobs followed by hooks).
+func (m *Model) clampJobsSelected() {
+	n := len(m.jobs) + len(m.hooks)
+	if m.jobsSelected >= n {
+		m.jobsSelected = n - 1
+	}
+	if m.jobsSelected < 0 {
+		m.jobsSelected = 0
+	}
 }
 
 // enterModelsTab initializes Models-tab state on entry: refreshes provider
@@ -2383,6 +2446,14 @@ func (m *Model) applyEventToSession(idx int, event protocol.SessionEvent) []tea.
 		// was persisted or swept): refresh the Vix-initiated group.
 		cmds = append(cmds, fetchVixSessions(m.socketPath, m.cwd, m.cfg.ConfigDir, m.authToken))
 
+	case "event.jobs_changed":
+		// A job/hook started, finished, was enabled/disabled, or the spec
+		// directory was reloaded: refresh the Jobs & Triggers tab when it is the
+		// active view so the running indicator and last-run stay current.
+		if m.activeTab == TabKindJobs {
+			cmds = append(cmds, fetchJobsAndHooks(m.socketPath, m.authToken))
+		}
+
 	case "event.job_done":
 		data := marshalData(event.Data)
 		var jd protocol.EventJobDone
@@ -2765,9 +2836,9 @@ func (m Model) View() tea.View {
 	y := 0
 
 	// Tab bar
-	viewportFocused := m.activeTab == TabKindSessions || m.activeTab == TabKindModels || m.activeTab == TabKindSettings || (sess != nil && sess.focus == FocusChat)
+	viewportFocused := m.activeTab == TabKindSessions || m.activeTab == TabKindModels || m.activeTab == TabKindJobs || m.activeTab == TabKindSettings || (sess != nil && sess.focus == FocusChat)
 	tabBarWidth := layout.ChatWidth
-	if m.activeTab == TabKindSessions || m.activeTab == TabKindModels || m.activeTab == TabKindSettings {
+	if m.activeTab == TabKindSessions || m.activeTab == TabKindModels || m.activeTab == TabKindJobs || m.activeTab == TabKindSettings {
 		tabBarWidth = m.width
 	}
 	tabBar := renderTabBar(m.activeTab, tabBarWidth, m.styles, viewportFocused, m.hasAlertSessions(), m.tabAlertBlinkOn, m.sessionsTabUnseen, m.updateLatest != "")
@@ -2950,6 +3021,16 @@ func (m Model) View() tea.View {
 			m.modelsFilter, m.activeModelSpec(), m.modelsLoginStatus)
 		uv.NewStyledString(mv).Draw(canvas, image.Rect(0, y, m.width, y+modelsHeight))
 		y += modelsHeight
+
+	case TabKindJobs:
+		jobsHeight := m.height - layout.TabBarHeight - layout.StatusBarHeight
+		spinnerFrame := ""
+		if m.sessionsSpinnerActive {
+			spinnerFrame = string(animFrames[frozenStep(m.sessionsSpinnerStep)%len(animFrames)])
+		}
+		jv := renderJobsView(m.jobs, m.hooks, m.width, jobsHeight, m.styles, m.jobsSelected, spinnerFrame)
+		uv.NewStyledString(jv).Draw(canvas, image.Rect(0, y, m.width, y+jobsHeight))
+		y += jobsHeight
 
 	case TabKindSettings:
 		settingsHeight := m.height - layout.TabBarHeight - layout.StatusBarHeight
@@ -3183,6 +3264,8 @@ func (m *Model) handleCommandAction(action string, sess *SessionState) []tea.Cmd
 					cmds = append(cmds, m.switchTab(TabKindChat))
 				case TabKindModels:
 					cmds = append(cmds, m.switchTab(TabKindModels))
+				case TabKindJobs:
+					cmds = append(cmds, m.switchTab(TabKindJobs))
 				case TabKindSettings:
 					cmds = append(cmds, m.switchTab(TabKindSettings))
 				}
@@ -3970,11 +4053,34 @@ func (m *Model) hasBusySessions() bool {
 // Sessions tab is active and at least one session is busy. No-op otherwise (and
 // when already running), so it is safe to call on every relevant state change.
 func (m *Model) maybeStartSessionsSpinner() tea.Cmd {
-	if m.sessionsSpinnerActive || m.activeTab != TabKindSessions || !m.hasBusySessions() {
+	if m.sessionsSpinnerActive || !m.spinnerShouldRun() {
 		return nil
 	}
 	m.sessionsSpinnerActive = true
 	return m.sessionsSpinnerTick()
+}
+
+// hasRunningJobs reports whether any scheduled job is currently executing.
+func (m *Model) hasRunningJobs() bool {
+	for _, j := range m.jobs {
+		if j.Running {
+			return true
+		}
+	}
+	return false
+}
+
+// spinnerShouldRun reports whether the list-loading spinner should animate:
+// busy sessions on the Sessions tab, or a running job on the Jobs & Triggers
+// tab. Used to gate both starting and continuing the spinner loop.
+func (m *Model) spinnerShouldRun() bool {
+	switch m.activeTab {
+	case TabKindSessions:
+		return m.hasBusySessions()
+	case TabKindJobs:
+		return m.hasRunningJobs()
+	}
+	return false
 }
 
 // stopSessionsSpinner halts the spinner loop and bumps the generation so any
