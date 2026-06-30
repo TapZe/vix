@@ -72,27 +72,31 @@ the model list is fetched live from the server — see [Model discovery](#model-
 
 ### Top-level document
 
-| Field | Type | Required | Description |
+| Field | Type | Overlay required? | Description |
 |---|---|---|---|
-| `schema_version` | `int` | Yes | Must be `1`. Newer versions are rejected at load. |
-| `providers` | `array` | Yes | List of provider specs. May be empty (`[]`). |
+| `schema_version` | `int` | No | If present, must be `1`. Newer values are rejected. Can be omitted from overlays — the embedded base already carries it. |
+| `providers` | `array` | No | List of provider specs. Can be `[]` if you only need to add `auth_logins`. |
 | `auth_logins` | `array` | No | OAuth login specs. Leave as `[]` unless you need OAuth. |
 
 ---
 
 ### Provider spec (`providers[*]`)
 
-| Field | Type | Required | Description |
+The "Required" column below applies to **new providers** you are adding from scratch.
+When **patching an existing built-in**, only supply the fields you want to override — all
+others are inherited from the embedded spec.
+
+| Field | Type | New provider | Description |
 |---|---|---|---|
-| `id` | `string` | Yes | Unique stable identifier (e.g. `"my-provider"`). Used to match overlay entries against built-ins. |
+| `id` | `string` | Yes | Unique stable identifier. For patches, must match the existing provider's `id` exactly. |
 | `display_name` | `string` | Yes | Human-readable name shown in the TUI. |
-| `model_prefix` | `string` | Yes | The prefix used in model specs (e.g. `"my-provider"` → model spec `"my-provider/model-name"`). Must not collide with another provider's prefix. |
+| `model_prefix` | `string` | Yes | The prefix used in model specs (e.g. `"my-provider"` → spec `"my-provider/model-name"`). Must not contain `/`. Must not collide with another provider's prefix. |
 | `wire_format` | `string` | Yes | Selects the HTTP adapter. See [Wire formats](#wire-formats). |
 | `effort_policy` | `string` | No | Default reasoning-effort policy. See [Effort policy](#effort-policy). |
-| `local` | `bool` | No | When `true`, models are fetched live from the server instead of reading the static `models` array. The provider is grouped separately in the TUI as a local provider. See [Model discovery](#model-discovery). |
+| `local` | `bool` | No | When `true`, models are fetched live from the server instead of the static `models` array. See [Model discovery](#model-discovery). Note: once set to `true` in the embedded defaults it cannot be overridden back to `false` by an overlay. |
 | `inference` | `object` | Yes | Connection settings. See [Inference spec](#inference-spec-inference). |
-| `credential_methods` | `array` | Yes | Ordered list of ways to obtain a credential. The first one that resolves wins. See [Credential methods](#credential-methods-credential_methods). |
-| `models` | `array` | No | Static model catalogue shown in the picker. Ignored when `local: true`. See [Model list](#model-list-models). |
+| `credential_methods` | `array` | Yes | Ordered list of ways to obtain a credential. The first one that resolves wins. **Replaces wholesale** in overlays — not merged entry-by-entry. See [Credential methods](#credential-methods-credential_methods). |
+| `models` | `array` | No | Static model catalogue. Ignored when `local: true`. **Replaces wholesale** in overlays. See [Model list](#model-list-models). |
 
 ---
 
@@ -130,9 +134,9 @@ Controls what default reasoning effort is used when you don't specify one explic
 | `base_url` | `string` | The API root URL. Supports `${env:VAR}` and `${env:VAR:-default}` interpolation. See [Env var interpolation](#environment-variable-interpolation). |
 | `auth_scheme` | `string` | How the resolved credential is attached to every request. `"bearer"` → `Authorization: Bearer <value>`. `"x-api-key"` → `x-api-key: <value>` (Anthropic default). |
 | `auth_header` | `string` | Raw header name for non-standard auth schemes. Rarely needed — leave empty unless the provider docs say otherwise. |
-| `headers` | `object` | Static `"key": "value"` headers added to every request. |
-| `query_params` | `object` | Static `"key": "value"` query parameters appended to every request URL. |
-| `json_set` | `object` | Arbitrary `"key": value` fields injected into every request body. Useful for vendor-specific knobs the adapter doesn't know about. |
+| `headers` | `object` | Static `"key": "value"` headers added to every request. Values support `${env:VAR}` interpolation; entries whose value resolves to an empty string are dropped. |
+| `query_params` | `object` | Static `"key": "value"` query parameters appended to every request URL. Values support `${env:VAR}` interpolation; entries whose value resolves to an empty string are dropped. |
+| `json_set` | `object` | Arbitrary `"key": value` fields injected into every request body. Values are **not** interpolated (they are non-string JSON). |
 | `effort_style` | `string` | For `chat_completions` wire format only. `"reasoning_effort"` sends the standard OpenAI `reasoning_effort` knob. `"reasoning_split"` sends `reasoning_split: true`. Leave empty for no reasoning field. |
 
 ---
@@ -150,13 +154,13 @@ value.
 
 | Field | Description |
 |---|---|
-| `env_var` | Environment variable name to read. Checked first. |
-| `keyring` | OS keyring / `.env` file key name. Checked if `env_var` is unset or empty. |
-| `label` | Human-readable name shown in the credential panel (useful when a provider has multiple keys). |
+| `env_var` | Environment variable name to read. Checked first. At least one of `env_var` or `keyring` **must** be set for `api_key` methods. |
+| `keyring` | OS keyring / `.env` file key name. Checked if `env_var` is unset or empty. At least one of `env_var` or `keyring` **must** be set for `api_key` methods. |
+| `label` | Human-readable name shown in the credential panel (useful when a provider has multiple keys of the same kind). Duplicate labels within the same provider are rejected. |
 | `header_style` | `"bearer"` to force `Authorization: Bearer` regardless of the `auth_scheme` on the inference block. |
 | `extra_headers_producer` | Built-in function that derives extra headers from the credential value. `"anthropic_oauth"` or `"codex_oauth"`. Leave empty for normal API keys. |
-| `base_url` | Endpoint override implied by this credential method (e.g. OAuth uses a different base URL than API key). |
-| `requires_base_url` | `true` if the user must supply the base URL at credential-entry time (e.g. region-specific endpoints). The TUI will prompt for it. |
+| `base_url` | Endpoint override implied by this credential method (e.g. OAuth uses a different base URL than API key). Must be HTTPS for remote providers. |
+| `requires_base_url` | `true` if the user must supply the base URL at credential-entry time (e.g. region-specific endpoints). The TUI will prompt for it. **Requires `keyring` to also be set** (used to store the endpoint). |
 | `base_url_env` | Env var that overrides the stored user-supplied base URL for a `requires_base_url` method. |
 
 #### `kind: "none"` — no credential needed
@@ -370,17 +374,29 @@ Some providers require non-standard body fields:
 
 ## Environment variable interpolation
 
-`base_url` supports `${env:...}` syntax so you can keep URLs out of the JSON file:
+The following `inference` string fields support `${env:...}` substitution:
+`base_url`, and individual values inside `headers` and `query_params`.
+
+> **Not interpolated:** `json_set` values (they are arbitrary JSON, not strings).
 
 | Syntax | Behaviour |
 |---|---|
 | `${env:MY_VAR}` | Substituted with `$MY_VAR`. Empty string if the variable is unset. |
 | `${env:MY_VAR:-https://fallback.example.com/v1}` | Substituted with `$MY_VAR`, falling back to the default when unset or empty. |
 
+Headers and query params whose value resolves to an empty string are **dropped** from the
+request (e.g. an optional group-ID header won't be sent as a blank header when the env var
+is absent).
+
 Example:
 
 ```json
-"base_url": "${env:MY_BASE_URL:-https://ai.example.com/v1}"
+"inference": {
+  "base_url": "${env:MY_BASE_URL:-https://ai.example.com/v1}",
+  "headers": {
+    "X-Group-ID": "${env:MY_GROUP_ID}"
+  }
+}
 ```
 
 ---
@@ -434,35 +450,41 @@ where opening a browser is impossible.
 | `redirect_uri` | `string` | Redirect URI used by the device flow. |
 | `timeout_seconds` | `int` | How long to poll before giving up. |
 
+### Security constraint: auth host allowlist
+
+> **Important:** OAuth endpoint URLs (`authorize_url`, `token_url`, `keys_url`, device
+> URLs) are validated against a **hardcoded allowlist** of trusted hosts. You cannot point
+> an `auth_logins` entry at an arbitrary domain — doing so is rejected at load with an
+> `"auth host not in allowlist"` error. The allowlist as of this writing:
+> - `claude.ai`, `platform.claude.com`, `api.anthropic.com`
+> - `auth.openai.com`
+> - `openrouter.ai`
+>
+> This is a deliberate security boundary: a data-driven config file cannot redirect OAuth
+> token exchange to an attacker-controlled host. Changing the allowlist requires modifying
+> `internal/providers/validate.go` and rebuilding the binary.
+
 ### Annotated example — OpenRouter OAuth (pkce_mint)
 
-This is how the built-in OpenRouter OAuth login is structured. You can override any
-field by providing an entry with `"id": "openrouter"` in your overlay's `auth_logins`.
+This is how the built-in OpenRouter OAuth login is structured. You can patch any field by
+providing an entry with `"id": "openrouter"` in your overlay's `auth_logins` — only the
+fields you supply win, the rest are inherited from the embedded spec.
 
 ```json
 {
-  "schema_version": 1,
   "providers": [],
   "auth_logins": [
     {
       "id": "openrouter",
       "flow": "oauth_pkce_mint",
-      "client_id": "<your-openrouter-client-id>",
       "authorize_url": "https://openrouter.ai/auth",
       "keys_url": "https://openrouter.ai/api/v1/auth/keys",
-      "callback_port": 7878,
-      "callback_path": "/oauth/callback",
-      "scope": "",
-      "extra_authorize_params": {
-        "code_challenge_method": "S256"
-      }
+      "callback_port": 53781,
+      "callback_path": "/callback"
     }
   ]
 }
 ```
-
-This example overrides the client ID but leaves the rest of the built-in Anthropic login
-intact (because the `id` matches, only fields you supply here win).
 
 > **Tip:** When in doubt, leave `auth_logins` as `[]` in your overlay. OAuth flows are
 > rarely needed for BYOP use cases — most self-hosted and third-party providers use a
