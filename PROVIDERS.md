@@ -496,9 +496,11 @@ fields you supply win, the rest are inherited from the embedded spec.
 
 **Provider doesn't appear in the TUI**
 - Restart `vixd` — the registry is loaded once at startup.
-- Check for a JSON parse error in `vixd`'s stderr output on startup.
-- Make sure there are no unknown/misspelled field names — the parser rejects unknown fields with
-  a hard error instead of silently ignoring them.
+- Check the `vixd` log output on startup for a `[providers] using embedded defaults: ...` warning.
+- Note: **unknown or misspelled field names are silently ignored** (standard Go JSON behaviour
+  — `json.Unmarshal` does not reject unknown fields). If you mistype `"wire_fromat"` it will
+  silently be ignored and the field will keep its inherited value. Double-check your field names
+  against this document.
 
 > **Parse error behavior:** On a parse error in your overlay, `vixd` logs a warning
 > (`[providers] using embedded defaults: ...`) and continues starting with the built-in
