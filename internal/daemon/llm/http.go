@@ -2,10 +2,14 @@ package llm
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptrace"
+	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -26,24 +30,113 @@ func SharedHTTPClient() *http.Client {
 	return &http.Client{Transport: sharedHTTPTransport}
 }
 
+// TLSMaterial names the (resolved) file paths for a provider's mutual-TLS
+// configuration. It is comparable so it can key the transport cache directly.
+type TLSMaterial struct {
+	ClientCert string // path to the client certificate (PEM)
+	ClientKey  string // path to the client private key (PEM)
+	CACert     string // optional path to a CA bundle (PEM) to verify the server
+}
+
+// empty reports whether no mTLS material is configured (the common case).
+func (m TLSMaterial) empty() bool {
+	return m.ClientCert == "" && m.ClientKey == "" && m.CACert == ""
+}
+
+var (
+	tlsTransportMu sync.Mutex
+	tlsTransports  = map[TLSMaterial]*http.Transport{}
+)
+
+// baseTransportFor returns the base RoundTripper a client should sit on for a
+// provider with the given mTLS material. Empty material returns the shared
+// transport unchanged (zero behavior change for every ordinary provider).
+// Non-empty material returns a cloned transport whose TLSClientConfig presents
+// the client certificate.
+//
+// Transports are cached by material: NewFromModel runs once per turn, so
+// building a fresh transport (and thus a fresh connection pool + TLS handshake)
+// every time would defeat pooling and leak connections. The cache also doubles
+// as the registry CloseIdleHTTPConnections sweeps between retries, so an mTLS
+// provider still benefits from the poisoned-connection cleanup the shared
+// transport was built for.
+func baseTransportFor(m TLSMaterial) (http.RoundTripper, error) {
+	if m.empty() {
+		return sharedHTTPTransport, nil
+	}
+	tlsTransportMu.Lock()
+	defer tlsTransportMu.Unlock()
+	if t, ok := tlsTransports[m]; ok {
+		return t, nil
+	}
+	tlsCfg, err := buildTLSConfig(m)
+	if err != nil {
+		return nil, err
+	}
+	t := sharedHTTPTransport.Clone()
+	t.TLSClientConfig = tlsCfg
+	tlsTransports[m] = t
+	return t, nil
+}
+
+// buildTLSConfig assembles a *tls.Config from mTLS material: a client
+// certificate (cert+key, both required together) and an optional CA pool used to
+// verify the server. Encrypted (passphrase-protected) private keys are not
+// supported — tls.LoadX509KeyPair rejects them with a clear error.
+func buildTLSConfig(m TLSMaterial) (*tls.Config, error) {
+	cfg := &tls.Config{}
+	if m.ClientCert != "" || m.ClientKey != "" {
+		if m.ClientCert == "" || m.ClientKey == "" {
+			return nil, fmt.Errorf("mTLS: client_cert and client_key must both be set")
+		}
+		cert, err := tls.LoadX509KeyPair(m.ClientCert, m.ClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("mTLS: load client cert/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	if m.CACert != "" {
+		pem, err := os.ReadFile(m.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("mTLS: read ca_cert: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("mTLS: ca_cert %q contains no valid certificates", m.CACert)
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
+}
+
 // CloseIdleHTTPConnections drops all pooled connections in the shared
-// transport. Called between retries so a poisoned conn doesn't get reused
-// on the next attempt.
+// transport and every cached mTLS transport. Called between retries so a
+// poisoned conn doesn't get reused on the next attempt.
 func CloseIdleHTTPConnections() {
 	sharedHTTPTransport.CloseIdleConnections()
+	tlsTransportMu.Lock()
+	for _, t := range tlsTransports {
+		t.CloseIdleConnections()
+	}
+	tlsTransportMu.Unlock()
 }
 
 // NewPluginHTTPClient returns an *http.Client whose Transport applies the
 // plugin's header set/strip rules to every outgoing request, then delegates
-// to the shared transport. The lifecycle-logging transport is composed on
-// the outside (see NewLoggingTransport) so the log ordering is:
+// to base (the shared transport, or a per-provider mTLS transport). The
+// lifecycle-logging transport is composed on the outside (see
+// NewLoggingTransport) so the log ordering is:
 //
-//	request → loggingTransport → headerStripperTransport → sharedHTTPTransport
+//	request → loggingTransport → headerStripperTransport → base
 //
-// Returns SharedHTTPClient() unchanged when pc has no headers.
-func NewPluginHTTPClient(pc PluginConfig) *http.Client {
+// A nil base falls back to the shared transport. When pc has no headers the
+// header layer is skipped, but logging (and the chosen base) are preserved.
+func NewPluginHTTPClient(pc PluginConfig, base http.RoundTripper) *http.Client {
+	if base == nil {
+		base = sharedHTTPTransport
+	}
 	if len(pc.Headers) == 0 {
-		return &http.Client{Transport: NewLoggingTransport(sharedHTTPTransport)}
+		return &http.Client{Transport: NewLoggingTransport(base)}
 	}
 
 	set := make(map[string]string)
@@ -58,7 +151,7 @@ func NewPluginHTTPClient(pc PluginConfig) *http.Client {
 	}
 
 	header := &headerStripperTransport{
-		base:  sharedHTTPTransport,
+		base:  base,
 		set:   set,
 		strip: strip,
 	}

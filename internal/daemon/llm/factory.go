@@ -24,7 +24,13 @@ type Config struct {
 	Effort     string // "", "low", "medium", "high", "max", "adaptive"
 	MaxTokens  int64  // 0 = use DefaultMaxTokens
 	PluginCfg  PluginConfig
-	HTTPClient *http.Client // optional override; nil = use NewPluginHTTPClient(PluginCfg)
+	HTTPClient *http.Client // optional override; nil = use NewPluginHTTPClient(PluginCfg, BaseTransport)
+
+	// BaseTransport is the RoundTripper the plugin HTTP client sits on when
+	// HTTPClient is not set. Nil means the package-shared transport. The factory
+	// sets it to a per-provider mTLS transport when the provider spec configures
+	// client certificates; header-strip and logging still compose on top.
+	BaseTransport http.RoundTripper
 
 	// BaseURL overrides the adapter's default API endpoint. Empty means
 	// use the provider's default. Set from a credential's endpoint override
@@ -115,12 +121,30 @@ func NewFromModel(spec string, plugins PluginSource, effort string, maxTokens in
 	}
 
 	inf := p.Inference.Resolve()
+
+	// Build the base transport: a per-provider mTLS transport when the spec
+	// configures client certificates, else the shared transport. Failures
+	// (missing/invalid cert files) surface here as a clean construction error.
+	var mat TLSMaterial
+	if inf.TLS != nil {
+		mat = TLSMaterial{
+			ClientCert: inf.TLS.ClientCert,
+			ClientKey:  inf.TLS.ClientKey,
+			CACert:     inf.TLS.CACert,
+		}
+	}
+	baseTransport, err := baseTransportFor(mat)
+	if err != nil {
+		return nil, fmt.Errorf("provider %s: %w", p.ID, err)
+	}
+
 	cfg := Config{
-		Credential: cred,
-		Model:      model,
-		Effort:     effort,
-		MaxTokens:  maxTokens,
-		PluginCfg:  pluginCfg,
+		Credential:    cred,
+		Model:         model,
+		Effort:        effort,
+		MaxTokens:     maxTokens,
+		PluginCfg:     pluginCfg,
+		BaseTransport: baseTransport,
 	}
 
 	// An auth method may carry an endpoint override (e.g. the Codex backend).

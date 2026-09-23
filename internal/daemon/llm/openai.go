@@ -45,7 +45,7 @@ func NewOpenAI(cfg Config) (Client, error) {
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = NewPluginHTTPClient(cfg.PluginCfg)
+		httpClient = NewPluginHTTPClient(cfg.PluginCfg, cfg.BaseTransport)
 	}
 	opts = append(opts, option.WithHTTPClient(httpClient))
 	if cfg.BaseURL != "" {

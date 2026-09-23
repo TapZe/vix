@@ -200,6 +200,9 @@ func mergeInference(a, b InferenceSpec) InferenceSpec {
 	if b.JSONSet != nil {
 		out.JSONSet = b.JSONSet
 	}
+	if b.TLS != nil {
+		out.TLS = b.TLS
+	}
 	return out
 }
 

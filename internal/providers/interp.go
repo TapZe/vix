@@ -83,6 +83,13 @@ func (in InferenceSpec) Resolve() InferenceSpec {
 		EffortStyle: in.EffortStyle,
 		JSONSet:     in.JSONSet, // values are not interpolated (non-string)
 	}
+	if in.TLS != nil {
+		out.TLS = &TLSSpec{
+			ClientCert: interpolate(in.TLS.ClientCert),
+			ClientKey:  interpolate(in.TLS.ClientKey),
+			CACert:     interpolate(in.TLS.CACert),
+		}
+	}
 	if len(in.Headers) > 0 {
 		out.Headers = make(map[string]string, len(in.Headers))
 		for k, v := range in.Headers {

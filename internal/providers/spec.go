@@ -134,6 +134,20 @@ type InferenceSpec struct {
 	QueryParams map[string]string `json:"query_params"` // appended to every request
 	JSONSet     map[string]any    `json:"json_set"`     // injected into every request body
 	EffortStyle string            `json:"effort_style"` // chat_completions only
+	// TLS, when set, makes vix present a client certificate on every request to
+	// this provider (mutual TLS). Used for private/corporate gateways fronting an
+	// OpenAI/Anthropic-compatible API. Nil (omitted) means ordinary one-way TLS.
+	TLS *TLSSpec `json:"tls,omitempty"`
+}
+
+// TLSSpec configures mutual TLS for a provider. Paths support ${env:VAR}
+// interpolation and are read by the daemon at client-construction time (not via
+// the file tools). ClientCert+ClientKey are a pair (both or neither). CACert is
+// optional; empty means the system root pool is used to verify the server.
+type TLSSpec struct {
+	ClientCert string `json:"client_cert"` // path to the client certificate (PEM)
+	ClientKey  string `json:"client_key"`  // path to the client private key (PEM)
+	CACert     string `json:"ca_cert"`     // optional path to a CA bundle (PEM) to verify the server
 }
 
 // CredentialMethod is one ordered way to obtain a credential for a provider.

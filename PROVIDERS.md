@@ -139,6 +139,45 @@ Controls what default reasoning effort is used when you don't specify one explic
 | `query_params` | `object` | Static `"key": "value"` query parameters appended to every request URL. Values support `${env:VAR}` interpolation; entries whose value resolves to an empty string are dropped. |
 | `json_set` | `object` | Arbitrary `"key": value` fields injected into every request body. Values are **not** interpolated (they are non-string JSON). |
 | `effort_style` | `string` | For `chat_completions` wire format only. `"reasoning_effort"` sends the standard OpenAI `reasoning_effort` knob. `"reasoning_split"` sends `reasoning_split: true`. Leave empty for no reasoning field. |
+| `tls` | `object` | Optional. Configures **mutual TLS** (client certificates) for this provider — for private/corporate gateways that require them. See [Mutual TLS](#mutual-tls-mtls) below. Omit for ordinary one-way TLS. |
+
+---
+
+### Mutual TLS (`inference.tls`)
+
+When a provider is fronted by a gateway that requires a **client certificate**,
+add a `tls` block to its `inference`:
+
+```json
+"inference": {
+  "base_url": "https://gateway.internal/v1",
+  "auth_scheme": "bearer",
+  "tls": {
+    "client_cert": "${env:VIX_MTLS_CERT:-/etc/vix/client.crt}",
+    "client_key":  "${env:VIX_MTLS_KEY:-/etc/vix/client.key}",
+    "ca_cert":     "${env:VIX_MTLS_CA}"
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `client_cert` | `string` | Path to the client certificate (PEM). Supports `${env:VAR}` interpolation. Must be set together with `client_key`. |
+| `client_key` | `string` | Path to the client private key (PEM). Supports `${env:VAR}` interpolation. |
+| `ca_cert` | `string` | Optional path to a CA bundle (PEM) used to verify the **server**. Empty means the system root pool is used. |
+
+The daemon reads these files at client-construction time and presents the
+certificate on every request to that provider. Transports are cached per unique
+cert/key/CA set, so repeated turns reuse one connection pool.
+
+**v1 limitations (by design):**
+
+- **Encrypted (passphrase-protected) private keys are not supported** — the load
+  fails with a clear error. Use an unencrypted key file with tight permissions.
+- **No hot reload:** a rotated certificate at the same path is not picked up
+  until the daemon restarts.
+- The daemon reads the key material directly (not through the file tools), so the
+  `deny_list` does not gate it — the operator owns those file permissions.
 
 ---
 

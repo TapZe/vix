@@ -39,7 +39,7 @@ func NewAnthropic(cfg Config) (Client, error) {
 	// wrapped HTTP client. Composes set/strip → logging → shared transport.
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = NewPluginHTTPClient(cfg.PluginCfg)
+		httpClient = NewPluginHTTPClient(cfg.PluginCfg, cfg.BaseTransport)
 	}
 	allOpts = append(allOpts, option.WithHTTPClient(httpClient))
 

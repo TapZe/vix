@@ -48,7 +48,7 @@ func NewBedrock(cfg Config) (Client, error) {
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = NewPluginHTTPClient(cfg.PluginCfg)
+		httpClient = NewPluginHTTPClient(cfg.PluginCfg, cfg.BaseTransport)
 	}
 	idle := cfg.StreamIdle
 	if idle <= 0 {
