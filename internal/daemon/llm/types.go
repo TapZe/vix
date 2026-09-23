@@ -15,6 +15,7 @@ const (
 	ProviderOpenRouter ProviderID = "openrouter"
 	ProviderMiniMax    ProviderID = "minimax"
 	ProviderMiMo       ProviderID = "mimo"
+	ProviderMeta       ProviderID = "meta"
 )
 
 // CredentialName returns the name used for credential resolution and

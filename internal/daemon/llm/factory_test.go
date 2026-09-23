@@ -18,6 +18,7 @@ func TestParseModel(t *testing.T) {
 		{"openrouter/openai/gpt-5.1", ProviderOpenRouter, "openai/gpt-5.1", false},
 		{"minimax/MiniMax-M2.7", ProviderMiniMax, "MiniMax-M2.7", false},
 		{"mimo/mimo-v2.5-pro", ProviderMiMo, "mimo-v2.5-pro", false},
+		{"meta/muse-spark-1.3", ProviderMeta, "muse-spark-1.3", false},
 		{"", "", "", true},
 		{"claude-sonnet-4-6", "", "", true}, // bare name, no prefix
 		{"gemini/pro", "", "", true},        // unknown prefix

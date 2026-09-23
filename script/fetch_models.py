@@ -223,6 +223,11 @@ def fetch_models(provider, env):
         # Drop non-chat audio modalities (TTS, ASR, Omni); keep text chat models.
         audio = ("tts", "asr", "omni")
         models = [m for m in models if not any(a in m[0].lower() for a in audio)]
+    elif provider.get("id") == "meta":
+        # Meta's /models mixes chat (muse-spark-*) with non-chat modalities:
+        # image generation (muse-image), speech-to-text (muse-voice), and
+        # segmentation (sam). Keep only the muse-spark text chat models.
+        models = [m for m in models if m[0].lower().startswith("muse-spark")]
     return ("ok", url, sorted(models, key=lambda m: m[0]))
 
 

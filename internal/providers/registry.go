@@ -157,5 +157,6 @@ func IsReasoningModel(model string) bool {
 		strings.HasPrefix(m, "o3") ||
 		strings.HasPrefix(m, "o4") ||
 		strings.HasPrefix(m, "gpt-5") ||
+		strings.HasPrefix(m, "muse-spark") ||
 		strings.Contains(m, "-thinking")
 }
